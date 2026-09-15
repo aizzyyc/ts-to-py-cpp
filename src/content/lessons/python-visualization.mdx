@@ -1,0 +1,211 @@
+---
+id: python-visualization
+slug: visualization-and-data-diagnostics
+title: "可视化与数据诊断"
+summary: "用分布、异常值和分组图检查数据，而不是直接把脏数据送进模型。"
+track: python
+order: 20
+durationMinutes: 16
+concepts: [visualization, eda, outliers]
+prerequisites: [python-numpy-linear]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+本节不是教你把图画得花哨，而是把可视化变成 AI 数据质量检查。你将会：
+
+- 用分布图发现偏斜、长尾、异常范围、类别不平衡和截断。
+- 用分组图比较设备、用户、站点或时间窗口，识别切分偏差。
+- 区分真正的异常、采集故障和合法稀有样本，避免盲目删除。
+- 保存可复现的图表和统计结果，并把观察转成下一步数据或模型行动。
+
+## 从 JS/TS 迁移的心智模型
+
+前端图表通常回答“页面上要展示什么”，训练前的诊断图要回答“数据是否符合模型假设”。JavaScript/TypeScript 的 groupBy 和 chart library 可以快速画出一张柱状图；Python 的 pandas、NumPy 和 Matplotlib 则适合把筛选条件、分组键、bin 边界和输出文件写进脚本。图表不能替代指标，它是寻找指标异常原因的证据。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const groups = groupBy(events, event => event.label);
+renderBarChart(Object.entries(groups), { title: "label count" });`}
+  targetLabel="Python / pandas"
+  targetLanguage="python"
+  target={`counts = frame["label"].value_counts(dropna=False)
+ax = counts.plot(kind="bar", title="label distribution")
+ax.figure.savefig("artifacts/label-count.png", dpi=140)`}
+/>
+
+<KeyIdea title="每张图都应带一个诊断问题">
+  <p>先写“我想排除什么假设”，再选择分布、箱线、分组或时间图。没有问题的图很容易变成装饰。</p>
+</KeyIdea>
+
+## 分布：先看整体，再看切分
+
+直方图和分位数能暴露尺度、偏斜、长尾、截断和大量相同值。对模型输入，同时画训练集、验证集的同一 bin 边界；如果两个集合用各自的分位数切 bin，差异会被掩盖。类别标签要看计数和比例，极度不平衡时只看 accuracy 会得到虚假的安全感。
+
+### 示例一：画出特征和标签分布
+
+```python
+import matplotlib.pyplot as plt
+import pandas as pd
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+frame["score"].plot(kind="hist", bins=20, ax=axes[0], title="score distribution")
+frame["label"].value_counts(dropna=False).plot(
+    kind="bar", ax=axes[1], title="label counts"
+)
+fig.tight_layout()
+fig.savefig("artifacts/eda-overview.png", dpi=140)
+plt.close(fig)
+
+print(frame["score"].describe(percentiles=[0.01, 0.5, 0.99]))
+```
+
+运行后应得到 PNG 和一份含 count、mean、std、1%/50%/99% 分位数的输出。图文件本身不是验证，应该把生成命令、数据版本、行数和筛选条件写进 artifact 名称或旁边的 JSON。若 label 有空值，先决定它是未知标签、拒绝样本还是单独类别，不要让 value_counts 的默认行为替你决定。
+
+## 异常值：异常不等于错误
+
+箱线图的离群点只是相对于分布的稀有值，不代表设备故障。传感器可能在启动瞬间出现合法峰值；采集系统可能把单位从毫秒改成秒，导致全体值一起偏移。先按 sensor_id、firmware 或时间分组检查，再与原始日志和业务范围对照。删除异常值前保存数量和原因，模型训练要能重跑同一规则。
+
+### 示例二：按设备找出可疑范围
+
+```python
+q = frame.groupby("sensor_id")["value"].quantile([0.01, 0.99]).unstack()
+q.columns = ["low_q", "high_q"]
+
+diagnostics = frame.merge(q, on="sensor_id", validate="many_to_one")
+diagnostics["outlier_by_group"] = (
+    (diagnostics["value"] < diagnostics["low_q"])
+    | (diagnostics["value"] > diagnostics["high_q"])
+)
+print(diagnostics.groupby("sensor_id")["outlier_by_group"].agg(["sum", "count"]))
+```
+
+这段输出的是“每个设备的可疑比例”，不是自动删除命令。若一个设备 90% 的值都被标记，说明分组统计或单位更可能有问题；若只有少数点，才值得抽样查看原始事件。用训练数据拟合异常阈值，再应用于验证/测试，避免把未来分布泄漏到训练规则。
+
+## 分组与时间诊断
+
+整体平均值可能掩盖某个站点或用户的失败。按 site、device_type、label 交叉分组，比较样本数、缺失率、正例比例和特征均值；按时间画 rolling 统计，检查数据漂移、采集中断和版本发布影响。分组前确认每组最小样本数，否则一个只有两条记录的组会产生看似剧烈的比例变化。
+
+### 示例三：找出切分和时间的差异
+
+```python
+frame["day"] = frame["timestamp"].dt.floor("D")
+group_report = (
+    frame.groupby(["day", "site"], dropna=False)
+    .agg(
+        rows=("event_id", "size"),
+        missing_score=("score", lambda s: s.isna().mean()),
+        positive_rate=("label", lambda s: (s == "wake").mean()),
+    )
+    .reset_index()
+)
+print(group_report.sort_values(["day", "site"]).tail(10))
+
+split_report = (
+    frame.groupby(["split", "label"], dropna=False)
+    .size()
+    .rename("rows")
+    .reset_index()
+)
+```
+
+如果训练集只有 lab-a、测试集只有 lab-b，模型指标测到的是站点迁移能力而不是随机抽样泛化；如果测试集包含训练之后的新 firmware，应该明确这是时间外推测试。可视化让这种事实更容易被看见，但最终要在数据切分代码中写成可重复规则。
+
+## 运行、输出与验证
+
+一次诊断运行至少保存三类结果：eda-overview.png 等图表、按组的 CSV/JSON 统计、包含输入哈希和代码版本的 manifest。运行验证可以是：
+
+```python
+required = {"event_id", "timestamp", "label", "score", "site"}
+assert required <= set(frame.columns)
+assert frame["timestamp"].notna().all()
+assert len(group_report) > 0
+print({
+    "rows": len(frame),
+    "sites": frame["site"].nunique(),
+    "labels": frame["label"].value_counts(dropna=False).to_dict(),
+    "artifact": "artifacts/eda-overview.png",
+})
+```
+
+不要只打开图片凭肉眼判断。把关键观察转成断言或报告，例如缺失率不得超过 2%、每个 split 至少有两类标签、图表生成时数据行数与 manifest 一致。断言失败时保留中间统计，才能定位是读取、解析、过滤还是分组逻辑出错。
+
+## 常见错误、排错与调试
+
+- 图为空或坐标轴怪异：检查筛选后的行数、dtype 和 NaN；先 frame.head()、frame.shape、frame.dtypes，再检查绘图调用。
+- 中文或负号显示异常：确认运行环境字体和输出格式；不要为解决数据问题反复改样式。
+- 离群点被全部裁掉：检查是否先 clip 再画图；诊断图应同时保留原始范围和展示用缩放。
+- 分组结果不稳定：固定排序，明确 dropna，记录分组键和最小样本数；不要让类别顺序由哈希顺序决定。
+- 训练/验证分布过于接近或完全不同：回看切分时间、group key、预处理拟合范围和是否把标签派生字段带进特征，重点排查 data leakage。
+- 运行很慢或内存高：只读需要列，先聚合再画图，关闭 figure；大量散点用抽样但保存抽样 seed。
+
+## 练习与任务
+
+为一份传感器分类表写 diagnose(frame, output_dir)：输出标签分布、每个 site 的缺失率、score 的分位数、按天的正例率和两张图；发现异常时返回带原因的报告，而不是静默删除行。要求图表使用固定标题和数据版本，能在 CI 中用无显示器环境运行。
+
+<Exercise
+  title="AI 数据诊断练习"
+  prompt="实现 diagnose(frame, output_dir)，至少生成标签分布图和 score 箱线图；返回 rows、missing_rate、group_counts、outlier_count，并在验证集比例异常时给出 warning。"
+  hint="先 copy 并校验 timestamp/score dtype；分组报告用 groupby；保存图后调用 plt.close。"
+  solution={`frame = frame.copy()
+report = {
+    "rows": len(frame),
+    "missing_rate": float(frame["score"].isna().mean()),
+    "group_counts": frame.groupby("site").size().to_dict(),
+    "outlier_count": int(frame["score"].gt(frame["score"].quantile(.99)).sum()),
+}
+return report`}
+/>
+
+### 完整答案
+
+```python
+def diagnose(frame: pd.DataFrame, output_dir):
+    output_dir.mkdir(parents=True, exist_ok=True)
+    work = frame.copy()
+    work["timestamp"] = pd.to_datetime(work["timestamp"], utc=True, errors="coerce")
+    work["score"] = pd.to_numeric(work["score"], errors="coerce")
+    if work["timestamp"].isna().any():
+        raise ValueError("timestamp contains invalid values")
+
+    report = {
+        "rows": int(len(work)),
+        "missing_score_rate": float(work["score"].isna().mean()),
+        "group_counts": {str(k): int(v) for k, v in work.groupby("site").size().items()},
+        "score_p01": float(work["score"].quantile(0.01)),
+        "score_p99": float(work["score"].quantile(0.99)),
+    }
+    outlier_mask = work["score"].lt(report["score_p01"]) | work["score"].gt(report["score_p99"])
+    report["outlier_count"] = int(outlier_mask.sum())
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    work["score"].plot(kind="hist", bins=20, ax=axes[0])
+    work.boxplot(column="score", by="site", ax=axes[1])
+    axes[0].set_title("score distribution")
+    axes[1].set_title("score by site")
+    fig.suptitle("")
+    fig.tight_layout()
+    fig.savefig(output_dir / "overview.png", dpi=140)
+    plt.close(fig)
+    return report
+```
+
+用同一 fixture 重跑两次，比较 report 和图表文件名；再用空表、坏 timestamp、单一标签、缺少 site 的输入测试失败路径。只有当输出统计与输入哈希、切分规则和版本一起保存时，诊断结果才可被下一个模型实验复用。
+
+<SolutionReveal>
+  <p>图表应该改变决策：补采哪类数据、是否调整切分、是否修复单位、是否重新计算指标。把观察写入 report，避免下一位工程师只能凭一张 PNG 猜测上下文。</p>
+</SolutionReveal>
+
+## 与同一 AI 项目主线的连接
+
+pandas 的清洗结果是可视化的输入，NumPy 的 shape/dtype 检查是图表之外的另一层护栏。训练前先用分布和分组图确认数据覆盖，训练后再把错误样本按 site、时间和置信度切片；这样 scikit-learn 的 baseline、PyTorch 的评估和线上漂移监控会共享相同的分组维度。可视化不应使用未来标签构造训练特征，也不应把测试集反复看成调参集；诊断本身也要遵守切分边界。
+
+## 小结
+
+可靠的 EDA 不是“画几张图”，而是用分布、异常、分组和时间视角验证数据假设。每张图要有问题、输入范围、分组语义和可复现输出；异常值要追原因，切分差异要写进报告，图表结果要转成可执行的清洗或采样决定。这样 Python 可视化才真正服务于 AI 数据质量，而不是停留在展示层。

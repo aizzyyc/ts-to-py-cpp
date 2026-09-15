@@ -1,0 +1,95 @@
+---
+id: common-debugging
+slug: debugging-workflow-and-minimal-reproduction
+title: "调试工作流与最小复现"
+summary: "把堆栈、断点、日志和二分定位组织成一套跨语言排错流程。"
+track: common
+order: 21
+durationMinutes: 14
+concepts: [debugging, stack trace, reproduction]
+prerequisites: [common-testing]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 调试工作流与最小复现
+
+JS/TS 的 console、断点和堆栈经验很有价值。Python traceback 和 C++ 调试器信息更多，但前提都是能稳定复现一个最小输入和明确的错误断点。跨语言调试的共同对象不是语法，而是证据：输入版本、时间线、调用栈、线程/进程、环境和预期结果。先把问题变成一次可重复的失败，再讨论是解析器、生命周期、并发还是协议造成的。
+
+最小复现不等于只删代码。要同时减少数据字段、依赖服务、线程数、随机种子和运行时间，并保留触发错误的必要条件。AI 问题可以保存脱敏后的样本 hash、模型版本和输入 shape；机器人问题要记录传感器帧、时间戳、坐标系和执行器状态。
+
+### 先缩小问题，再看语言细节
+
+下面这段代码只保留同一个意图，重点观察输入边界、数据流和失败语义，而不是逐字符翻译。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`try {
+  return transform(payload);
+} catch (error) {
+  console.error({ requestId, error });
+  throw error;
+}`}
+  targetLabel="Python / C++"
+  targetLanguage="text"
+  target={`# Python
+try:
+    return transform(payload)
+except Exception:
+    logger.exception("transform failed", extra={"request_id": request_id})
+    raise
+
+// C++
+try { return transform(payload); }
+catch (const std::exception& error) {
+  log_error(request_id, error.what());
+  throw;
+}`}
+/>
+
+### 从堆栈和断点建立时间线
+
+先确认错误发生的第一层边界，再用断点或日志验证输入是否已经改变。Node/Python 的 traceback 常能直接显示调用链，C++ 需要结合调试符号、线程栈和变量观察；优化构建可能让行号和变量不可见，应先在可调试构建中复现。对异步代码，同时记录任务创建、开始、完成和取消；对多进程代码，还要记录 pid 和 stdout/stderr。
+
+```typescript
+function normalize(payload: unknown, requestId: string): number[] {
+  console.debug({ event: "normalize_start", requestId });
+  if (!Array.isArray(payload)) throw new TypeError("payload must be an array");
+  const values = payload.map((item) => Number(item));
+  if (values.some((value) => !Number.isFinite(value))) {
+    throw new TypeError("payload contains a non-finite value");
+  }
+  return values;
+}
+```
+
+### 最小化与二分定位
+
+先固定环境和输入，再一次只删除一个字段或替换一个依赖。若错误消失，说明刚删除的部分是必要条件；若仍存在，继续缩小。对回归问题可以在提交、模型版本或数据批次上二分。不要同时升级 Node、Python 包和编译器，否则即使问题消失也不知道哪个变化起作用。
+
+### 常见错误与排错思路
+
+常见错误是直接重试偶发失败，却没有保存失败样本；另一个是只看最后一条日志，错过了最初的输入校验错误。排错时比较“预期—实际”而不是整段对象，给每个实验编号，记录命令和差异。修复后把最小样本加入回归测试，并验证测试在修复前确实能失败、修复后稳定通过。
+
+<KeyIdea title="先缩小问题，再看语言细节">
+  <p>跨语言排错的共同语言是证据：输入、时间线、堆栈和可重复的测试。减少变量之后，Python traceback 与 C++ 调试器才会指向真正根因。</p>
+</KeyIdea>
+
+## 迁移练习
+
+请完成：将一个偶发的 JSON 解析错误缩小成一个固定输入的回归测试，记录版本、输入摘要、第一处错误和修复后的预期。
+
+<Exercise
+  title="调试工作流与最小复现练习"
+  prompt="将一个偶发的 JSON 解析错误缩小成一个固定输入的回归测试，记录版本、输入摘要、第一处错误和修复后的预期。"
+  hint="先记录原始输入的 hash、版本和失败位置，再逐步删字段；不要把隐私原文提交到仓库。"
+  solution={`保存脱敏后的最小样本或受控 fixture，记录 parser/model 版本、payload hash 和期望错误类型；先确认旧代码会失败，再把样本加入测试，修复后断言字段位置和错误类别稳定。`}
+/>
+
+<SolutionReveal>
+  <p>跨语言排错的共同语言是证据：输入、时间线、堆栈和可重复的测试。完成后，请保留最小复现和回归测试，让下一次迁移不会重新支付同一笔排错成本。</p>
+</SolutionReveal>

@@ -1,0 +1,31 @@
+---
+interface Props {
+  title: string;
+  prompt: string;
+  hint: string;
+  solution: string;
+}
+
+const { title, prompt, hint, solution } = Astro.props;
+---
+
+<section class="exercise" aria-labelledby={`exercise-${title}`}>
+  <div class="exercise-heading">
+    <span class="exercise-number">01</span>
+    <div>
+      <span class="eyebrow">TRY IT YOURSELF</span>
+      <h3 id={`exercise-${title}`}>{title}</h3>
+    </div>
+  </div>
+  <p>{prompt}</p>
+  <div class="exercise-actions">
+    <details>
+      <summary>给我一点提示</summary>
+      <p>{hint}</p>
+    </details>
+    <details>
+      <summary>查看参考答案</summary>
+      <pre><code>{solution}</code></pre>
+    </details>
+  </div>
+</section>

@@ -1,0 +1,143 @@
+---
+id: cpp-templates
+slug: templates-and-generic-algorithms
+title: "模板与泛型算法"
+summary: "把 TypeScript 泛型的经验迁移到 C++ 模板、类型推导和可复用算法。"
+track: cpp
+order: 12
+durationMinutes: 16
+concepts: [templates, generics, type deduction, algorithms]
+prerequisites: [cpp-interfaces]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+完成本节后，你能把 TypeScript generic 的约束迁移为 C++ function template 和 class template；理解模板实例化、类型推导、引用折叠和 concepts 的作用；会写一个适用于不同传感器数值类型的通用算法，并能解释模板错误、代码膨胀与运行时多态的取舍。
+
+## TS generic 与 C++ template 的差异
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'function clamp<T>(value: T): T'} targetLabel="C++" targetLanguage="cpp" target={'template<typename T> T clamp(T value)'} />
+
+TS 泛型大多在类型擦除或 JavaScript 运行时之上工作，C++ 模板在编译期为具体类型生成代码。template with typename T 不是一个可以直接运行的函数，只有调用它时编译器才实例化。这样可以获得静态类型和内联机会，但错误信息可能很长，二进制也可能因为多种类型实例化而变大。
+
+反例是把 template 当成 any。没有约束的模板允许表达式直到实例化才失败；如果算法需要比较、加法或 size，就应该在接口或 concepts 中明确。另一个反例是所有地方都用运行时基类：当数据类型在编译期已知时，模板往往能避免虚调用和堆分配。
+
+## 示例一：函数模板和类型推导
+
+~~~cpp
+#include <iostream>
+
+template <typename T>
+T clamp_value(T value, T minimum, T maximum) {
+  if (value < minimum) return minimum;
+  if (value > maximum) return maximum;
+  return value;
+}
+
+int main() {
+  std::cout << clamp_value(6, 0, 5) << "\n";
+  std::cout << clamp_value(1.25, 0.0, 5.0) << "\n";
+}
+~~~
+
+两个调用分别实例化 int 和 double，输出 5 和 1.25。模板参数推导要求参数类型能匹配；clamp_value(1, 0.0, 5.0) 可能无法推导出同一个 T，应该由调用者显式转换或重新设计。编译器生成的是类型安全版本，不会像 JS 那样在运行时突然把字符串和数字比较。
+
+## 示例二：模板处理连续样本
+
+~~~cpp
+#include <algorithm>
+#include <span>
+
+template <typename T>
+T max_sample(std::span<const T> samples) {
+  if (samples.empty()) return T{};
+  return *std::max_element(samples.begin(), samples.end());
+}
+~~~
+
+这个函数可以接收只读 int 或 double 连续范围，但要求 T 能默认构造并可比较。调用时验证空输入返回该类型的零值，非空输入返回最大值。若“空”与“零”不能混淆，应返回带有 T 类型的 optional；模板只解决类型复用，不替你决定业务失败语义。
+
+## 示例三：concepts 让约束靠近接口
+
+~~~cpp
+#include <concepts>
+#include <iostream>
+
+template <std::floating_point T>
+T meters_to_millimeters(T meters) {
+  return meters * static_cast<T>(1000);
+}
+
+int main() {
+  std::cout << meters_to_millimeters(1.25) << "\n";
+}
+~~~
+
+floating_point concept 在调用点附近给出清楚限制：int 不会误用这个单位变换。使用 c++ -std=c++20 -Wall -Wextra 编译，输出 1250。若传入字符串，错误会指向约束不满足，而不是模板深处一连串难读的 operator 错误。对实际项目来说，concepts 还能记录算法需要的能力。
+
+## class template：固定容量的消息窗口
+
+~~~cpp
+#include <array>
+#include <cstddef>
+
+template <typename T, std::size_t Capacity>
+class SampleWindow {
+public:
+  bool push(T value) {
+    if (size_ == Capacity) return false;
+    values_[size_++] = value;
+    return true;
+  }
+  std::size_t size() const { return size_; }
+  const T& operator[](std::size_t index) const { return values_[index]; }
+private:
+  std::array<T, Capacity> values_{};
+  std::size_t size_{0};
+};
+~~~
+
+Capacity 是 non-type template parameter，编译期固定数组大小，避免动态分配；push 在满时返回 false。这个版本的 operator[] 仍要求调用者保证边界，生产接口可增加 at 做检查。机器人控制周期需要固定上限时，固定容量结构常比无限增长的 vector 更可预测。
+
+## 模板、头文件和链接
+
+模板实现通常放在 header，因为使用者的翻译单元需要看到完整定义才能实例化。若只在 cpp 中写模板定义，另一个 cpp 可能链接不到需要的实例；也可以显式实例化指定类型。与普通函数不同，模板的重定义规则和 inline 组织方式要一起考虑。初学阶段先把小模板放在自包含 header，并为它写最小调用程序。
+
+## 运行时多态与编译期泛型
+
+虚接口适合运行时才知道设备类型、需要动态替换或插件的场景；模板适合编译期知道类型、追求内联和零虚调用的算法。模板会增加编译时间、错误信息和二进制实例数量，虚接口会带来间接调用和对象生命周期设计。机器人系统可以让硬件层用接口，数值处理层用模板，按边界组合两者。
+
+## 编译、运行与排错
+
+使用 c++ -std=c++20 -Wall -Wextra -Wpedantic -Wconversion。若推导失败，检查各参数是否需要同一 T；若错误信息很长，先读最靠近调用点的 constraint 或候选函数；若链接缺少模板符号，把定义移到 header 或添加显式实例化；若程序体积异常，统计实例化类型和编译选项。模板错误不能靠运行时日志发现，因为失败发生在编译期。
+
+## 机器人连接：同一算法服务不同消息类型
+
+距离可以用 float 或 double，序号可以用 int，但“过滤有效样本”“计算最大值”“裁剪范围”往往是相同算法。模板和 concepts 让算法复用，同时保留类型检查；固定容量窗口还可用于控制周期内的 IMU 样本，避免未限制的队列增长。真正接入 ROS 2 时，消息适配层负责把消息字段转换成算法需要的 span 或 value type。
+
+<KeyIdea title="泛型的第一步是写清楚需要什么能力">
+  <p>模板不是动态 any。先列出算法需要比较、加法、默认构造还是范围，再用参数类型或 concepts 表达约束；这样错误更早、代码更可复用。</p>
+</KeyIdea>
+
+## 动手练习
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'function max<T>(values: T[]): T'} targetLabel="C++" targetLanguage="cpp" target={'template<typename T> T max(std::span<const T> values)'} />
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'const output = values.map(convert);'} targetLabel="C++" targetLanguage="cpp" target={'std::ranges::transform(values, output, convert);'} />
+
+实现一个 constrained average：接收只读的 T 连续范围，只对满足可比较范围的样本计算平均值；为 int 和 double 分别调用。再让 SampleWindow 满时返回 false，并验证它不会越界写入。
+
+<Exercise title="写一个可复用的采样算法" prompt="选择 function template 或 concept，支持 float 与 double 的单位转换，并说明为什么空输入应返回 optional 而不是默认 0。" hint="使用 std::floating_point 约束；累加时把初值和返回类型保持为 T；空 span 先返回 nullopt。" solution="template<std::floating_point T> std::optional<T> average(std::span<const T> values)；空范围返回 std::nullopt，非空范围累加后除以 static_cast<T>(size)，调用点分别传入 float 和 double。" />
+
+## 小结与下一步
+
+<SolutionReveal>
+  <p>打开答案后，请把示例改成自己的传感器数据，再用编译器、运行输出和边界输入验证，而不是只对照文字。</p>
+</SolutionReveal>
+
+模板把重复的数值算法移动到编译期，concepts 把所需能力写成接口约束；接口和模板并非二选一，而是分别服务运行时替换和编译期复用。完成这 12 节后，你已经有了从构建、内存到可测试模块的 C++ 基础，可以继续进入 STL 深化、并发、网络和 ROS 2 消息项目。

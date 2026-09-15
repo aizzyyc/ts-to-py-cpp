@@ -1,0 +1,198 @@
+---
+id: python-numpy
+slug: numpy-arrays-and-vectorized-thinking
+title: "NumPy 数组与向量化思维"
+summary: "从 JavaScript 数组进入 AI 常用的批量数据、形状和向量化操作。"
+track: python
+order: 18
+durationMinutes: 16
+concepts: [numpy, arrays, shape, vectorization]
+prerequisites: [python-data]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+本节要把“能遍历数组”提升为“能管理批量数值张量”。完成后你能够：
+
+- 读懂 ndarray 的 shape、ndim、dtype、axis 和内存占用。
+- 把 batch、features、time、channel 等 AI 输入契约写出来并验证。
+- 用向量化、布尔索引和 ufunc 替代合适的 Python 循环，同时知道何时不要强行向量化。
+- 区分 view 与 copy，避免预处理一步意外修改原始样本。
+
+## 从 JavaScript/TypeScript 迁移的心智模型
+
+JS/TS 数组可以混合字符串、数字和空值，map 返回的新数组也不会告诉你底层元素如何排列。NumPy ndarray 更接近一块有类型的连续批量内存：shape 描述轴，dtype 决定每个元素如何解释，axis 决定聚合沿哪个方向进行。AI 模型不认识“这是一行对象”，它只接收符合 shape 和 dtype 的数值矩阵。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const normalized = values.map(value => (value - mean) / scale);
+const features = rows.map(row => [row.temp, row.pressure, row.speed]);`}
+  targetLabel="Python / NumPy"
+  targetLanguage="python"
+  target={`values = np.asarray(values, dtype=np.float32)
+normalized = (values - mean) / scale
+features = np.asarray(rows, dtype=np.float32)`}
+/>
+
+<KeyIdea title="shape 是 NumPy 的隐形类型">
+  <p>TypeScript 类型能说明字段是否存在；NumPy 还必须说明每个轴代表 batch、时间、特征还是通道。没有轴语义，广播成功也可能是错的。</p>
+</KeyIdea>
+
+## ndarray、shape 与 dtype
+
+一条特征通常是 features，一批特征是 batch、features。语音可能是 batch、time、channels，图像常见 batch、channels、height、width。不要把 n 与 n、1 当成同一个 shape：前者是向量，后者是二维列矩阵，后续矩阵乘法和广播行为不同。
+
+np.asarray 适合把输入规范化为数组，但可能复用已有 ndarray；如果下游会原地修改，就显式 copy。AI 数据通常使用 float32 以减少内存并匹配 PyTorch 默认模型权重；标签和索引也许应是整数，不能为了“统一”把分类标签转成浮点。
+
+### 示例一：把 Python 记录变成可验证的批量特征
+
+```python
+import numpy as np
+
+rows = [[0.2, 10.0, 1.5], [0.4, 12.0, 1.7]]
+x = np.asarray(rows, dtype=np.float32)
+
+print(x.shape, x.ndim, x.dtype, x.nbytes)
+assert x.ndim == 2
+assert x.shape[1] == 3
+assert x.dtype == np.float32
+```
+
+输出类似 (2, 3) 2 float32 24。这里 2 是 batch，3 是特征；如果读入空列表，np.asarray([]) 会得到 (0,)，不能直接当成 (0, 3)，应在输入层用 np.empty((0, 3), dtype=np.float32) 或先拒绝空批次。shape 检查要在送进模型之前做，错误应包含期望和实际值。
+
+## axis、切片与向量化
+
+对 batch、features 的 x.mean(axis=0) 会压掉 batch 轴，结果是每个特征一个均值，shape 为 features；x.mean(axis=1) 会压掉 features 轴，结果是每条样本一个均值，shape 为 batch。不确定时画出被压缩的轴，或使用 keepdims=True 保留 batch、1 或 1、features 的广播形状。
+
+向量化适合同一规则作用于整块数值，例如裁剪、标准化、阈值判断。它不适合包含 HTTP 调用、日志副作用或复杂的逐条业务状态；np.vectorize 只是把 Python 循环包装起来，并不自动获得 C 级速度。
+
+### 示例二：按训练集统计量标准化特征
+
+```python
+train = np.array([[20.0, 100.0], [22.0, 110.0], [24.0, 90.0]], dtype=np.float32)
+mean = train.mean(axis=0)
+std = train.std(axis=0)
+std = np.maximum(std, np.float32(1e-6))
+
+batch = np.array([[21.0, 105.0], [30.0, 120.0]], dtype=np.float32)
+normalized = (batch - mean) / std
+normalized = np.clip(normalized, -5.0, 5.0).astype(np.float32)
+
+print(mean.shape, normalized.shape, normalized.dtype)
+```
+
+注意 mean 和 std 必须只从训练集计算；如果把验证和测试样本一起算进去，就是预处理泄漏。输出 shape 应与输入 batch 相同，dtype 应能被后续 Tensor 安全接收。常量特征的标准差为零时应选择业务策略：删除、保留为零，或记录为无信息列，不能让 NaN 进入模型。
+
+## view、copy 与内存所有权
+
+基础切片通常返回 view：window = x[:10] 后修改 window 可能修改 x。布尔索引和整数索引通常创建 copy，但不要靠记忆推测，关键边界用 np.shares_memory 检查。把大数组复制到多个阶段会增加内存峰值，完全不复制又会产生隐式副作用；数据准备函数应明确“读取只读”还是“返回拥有独立内存的结果”。
+
+### 示例三：展示切片副作用
+
+```python
+x = np.arange(6, dtype=np.float32)
+view = x[1:4]
+view[:] = -1
+print(x)  # [ 0. -1. -1. -1.  4.  5.]
+
+safe = x[1:4].copy()
+safe[:] = 7
+print(x)  # 原数组不再被 safe 改写
+print(np.shares_memory(x, view), np.shares_memory(x, safe))
+```
+
+对训练 fixture，推荐在入口处复制并在返回值上做只读约定，或者使用 result = np.array(input, dtype=np.float32, copy=True) 建立明确边界。处理百万级样本时再用 nbytes 和 profile 评估是否需要分块，而不是一开始就随意删掉所有 copy。
+
+## 运行、输出与验证
+
+写一个小的 validate_features，输出 shape、dtype、有限数比例和每列范围。验证应覆盖正常批次、空批次、错误列数、NaN、极大值和原地修改：
+
+```python
+def validate_features(x, feature_count=3):
+    x = np.asarray(x)
+    if x.ndim != 2 or x.shape[1] != feature_count:
+        raise ValueError(f"expected (batch, {feature_count}), got {x.shape}")
+    if x.shape[0] == 0:
+        raise ValueError("batch must not be empty")
+    if not np.isfinite(x).all():
+        raise ValueError("features must be finite")
+    print({
+        "shape": x.shape,
+        "dtype": str(x.dtype),
+        "min": float(x.min()),
+        "max": float(x.max()),
+    })
+    return x.astype(np.float32, copy=False)
+```
+
+若输出中 dtype 是 int64，这不一定错误，但要确认模型是否期待浮点；若 min/max 超过训练时范围，应标记为分布异常，而不是只做 clip 后忘记记录。NumPy 只验证容器和数值，单位、标签映射和数据版本仍需由上层契约负责。
+
+## 常见错误、排错与调试
+
+- operands could not be broadcast together：逐个打印参与运算数组的 shape，写出期望的轴语义；不要只给某个维度加 1 直到错误消失。
+- n 与 n、1 混用：用 x[:, None] 或 reshape(n, 1) 明确增加轴，并在测试里检查最终 shape。
+- output array is read-only 或整数原地除法失败：检查 dtype、flags.writeable 和是否使用了共享 view。
+- 标准化后全是 NaN：检查输入有限性、零标准差、除法 dtype，并确认统计量没有从错误数据集计算。
+- 内存暴涨：查看 x.nbytes、临时表达式数量和是否重复 copy；对大数据采用分块和预分配。
+- 速度没有提升：确认是否用了真正的 ufunc；网络、字符串逻辑不会因为写成 np.vectorize 就变快。
+
+## 练习与任务
+
+实现 normalize_sensor_batch(batch, low, high)：输入必须是 (n, 3) 的温度、压力、速度，输出是独立的 float32 数组，按列归一化到 [0, 1]；high == low 的常量列输出 0；拒绝 NaN，保留 batch 维度，并验证输入未被修改。
+
+<Exercise
+  title="NumPy 批量特征练习"
+  prompt="实现 normalize_sensor_batch(batch, low, high)，覆盖普通批次、常量列、越界值、空数组和非法 shape；报告输出 shape、dtype 与每列范围。"
+  hint="先 copy 成 float32，再检查 ndim 和 shape；用 np.divide 的 out/where 处理零分母，最后 clip。"
+  solution={`x = np.array(batch, dtype=np.float32, copy=True)
+if x.ndim != 2 or x.shape[1] != 3:
+    raise ValueError("expected (batch, 3)")
+low = np.asarray(low, dtype=np.float32)
+scale = np.asarray(high, dtype=np.float32) - low
+result = np.divide(x - low, scale, out=np.zeros_like(x), where=scale != 0)
+return np.clip(result, 0, 1).astype(np.float32)`}
+/>
+
+### 完整答案
+
+```python
+def normalize_sensor_batch(batch, low, high):
+    x = np.array(batch, dtype=np.float32, copy=True)
+    if x.ndim != 2 or x.shape[1] != 3:
+        raise ValueError(f"expected (batch, 3), got {x.shape}")
+    if not np.isfinite(x).all():
+        raise ValueError("batch contains NaN or Inf")
+
+    low = np.asarray(low, dtype=np.float32)
+    high = np.asarray(high, dtype=np.float32)
+    if low.shape != (3,) or high.shape != (3,):
+        raise ValueError("low and high must have shape (3,)")
+    scale = high - low
+    result = np.divide(
+        x - low,
+        scale,
+        out=np.zeros_like(x),
+        where=scale != 0,
+    )
+    return np.clip(result, 0, 1).astype(np.float32, copy=False)
+```
+
+用 np.testing.assert_allclose 对普通数据做手算对照，再用 np.shares_memory 和输入副本比较，确认原数组不变。验证输出的 shape 与输入相同，常量列确实为 0，这比只打印一个漂亮的小数更能证明函数可靠。
+
+<SolutionReveal>
+  <p>把检查放在数据边界，而不是等 PyTorch 抛出维度错误。下一节的广播与线性代数会继续使用同一套 shape 语言解释矩阵乘法。</p>
+</SolutionReveal>
+
+## 与同一 AI 项目主线的连接
+
+pandas 负责把事件变成字段稳定的表，NumPy 负责把选定列变成有 dtype 的批量矩阵。训练前要保存特征顺序、均值/标准差、单位和数据版本；推理时必须按同样顺序和 dtype 构造输入。batch、features 一旦写成可执行断言，scikit-learn Pipeline、PyTorch DataLoader 和部署 API 都可以复用，而不是每层各自猜测形状。
+
+## 小结
+
+ndarray 的工程价值在于统一的 shape、dtype、axis 和内存语义。先验证维度和有限性，再向量化；先明确 view 的所有权，再决定是否 copy；先用训练集统计量，再把同一变换应用到其他数据。AI 中“快”只是结果之一，正确的批量含义和可复现的输入才是更重要的契约。

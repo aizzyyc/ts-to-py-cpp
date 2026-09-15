@@ -1,0 +1,40 @@
+---
+import SiteHeader from "../components/SiteHeader.astro";
+import "../styles/global.css";
+
+interface Props {
+  title?: string;
+  description?: string;
+}
+
+const {
+  title = "LangShift · 从 JS/TS 到 AI 与机器人",
+  description = "给有项目经验的 JavaScript / TypeScript 开发者设计的 Python 与 C++ 迁移学习工作台。",
+} = Astro.props;
+---
+
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="description" content={description} />
+    <meta name="theme-color" content="#f6f8fb" />
+    <link rel="icon" href="data:," />
+    <title>{title}</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+    <SiteHeader />
+    <main id="main-content">
+      <slot />
+    </main>
+    <footer class="site-footer">
+      <div class="page-container footer-inner">
+        <span class="footer-brand"><span class="brand-mark small">L</span> LangShift</span>
+        <span>从熟悉的语言出发，走向新的工程现场。</span>
+      </div>
+    </footer>
+    <script src="../scripts/progress-client.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,156 @@
+---
+id: cpp-ros-params
+slug: ros2-parameters-launch-and-lifecycle
+title: "ROS 2 参数、Launch 与生命周期"
+summary: "把硬编码配置移到参数和 launch，并理解节点启动、暂停和关闭的状态。"
+track: cpp
+order: 27
+durationMinutes: 20
+concepts: [parameters, launch, lifecycle]
+prerequisites: [cpp-ros-services]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## ROS 2 参数、Launch 与生命周期
+
+Node.js 可以从环境变量或配置文件取值，ROS 2 的 parameter、launch 和 lifecycle 则把“配置”“装配”“是否可服务”拆成不同契约。同一个传感器节点应能在仿真、测试和真实设备中使用不同 topic、frame 和频率，而不需要重新编译。参数还要有类型、默认值、范围检查和动态修改策略。
+
+## 学习目标
+
+- 能把有 JS/TS 基础时熟悉的环境变量与配置对象，迁移成类型明确、可校验的 ROS 2 parameters。
+- 能用 launch/YAML 装配仿真与实机配置，并解释 remap、namespace 和 lifecycle 的关系。
+- 能通过 `ros2 param`、状态转换和日志验证最终配置，而不是只确认 launch 命令没有报错。
+
+### 声明参数并验证最终值
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const port = Number(process.env.PORT ?? 8080);
+const interval = Number(process.env.INTERVAL_MS ?? 10);
+start({ port, interval });`}
+  targetLabel="C++ / ROS 2"
+  targetLanguage="cpp"
+  target={`declare_parameter("interval_ms", 10);
+const auto interval = get_parameter("interval_ms").as_int();
+if (interval <= 0) throw std::invalid_argument("interval");`}
+/>
+
+在构造或 configure 阶段声明 `frame_id`、`topic`、`rate_hz`，读取后一次性校验并打印摘要。参数被 launch 覆盖后，代码不要继续依赖旧的成员默认值。动态参数回调要检查新值并在必要时拒绝；如果修改会改变硬件资源，应先停用、重新配置，再允许生效。
+
+### 生命周期控制资源可用性
+
+```cpp
+CallbackReturn on_configure(const rclcpp_lifecycle::State&) {
+  const auto frame = get_parameter("frame_id").as_string();
+  const auto rate = get_parameter("rate_hz").as_double();
+  if (frame.empty() || rate <= 0.0) return CallbackReturn::FAILURE;
+  sensor_ = std::make_unique<Sensor>(frame, rate);
+  return CallbackReturn::SUCCESS;
+}
+
+CallbackReturn on_activate(const rclcpp_lifecycle::State&) {
+  publisher_->on_activate();
+  sensor_->start();
+  return CallbackReturn::SUCCESS;
+}
+```
+
+生命周期的 configure 适合分配和打开资源，activate 才允许发布，deactivate 停止对外输出，cleanup 释放资源，shutdown 走最终关闭。每个回调都要处理失败返回，不能在未 configure 的状态使用空 publisher。实际返回类型和成员初始化需匹配 ROS 2 版本，但状态意图保持不变。
+
+### launch 是装配层
+
+```python
+from launch_ros.actions import Node
+
+Node(
+    package="sensor_app",
+    executable="range_node",
+    name="front_range",
+    parameters=[{"frame_id": "laser", "topic": "/scan", "rate_hz": 20.0}],
+)
+```
+
+测试 launch 应给固定 fixture、模拟时钟和可预测 topic；生产 launch 才注入设备路径、namespace 和 QoS。参数 YAML 适合大量标量配置，launch 负责多个节点的条件、重映射和生命周期管理。最终启动日志写出解析后的参数，方便核对 overlay 和命名空间。
+
+### 常见编译、链接、运行时错误
+
+参数类型不一致会在 `as_*` 或设置时失败，先用 `ros2 param describe/get` 查实际类型；参数名被 namespace 改写时，检查完整节点名。生命周期节点没有发布，确认是否完成 configure/activate，而不是只看进程存在。launch 找不到可执行文件检查 install target；动态参数改了但硬件未变，说明只更新了成员变量却没有实现重配置协议。构造阶段抛异常要在启动边界记录并让节点进入失败状态。
+
+<KeyIdea title="参数、装配和生命周期各司其职">
+  <p>参数定义可变配置，launch 组合节点，lifecycle 控制资源什么时候对外可用。把硬件值放在配置边界，把状态转换写成可观察的成功/失败。</p>
+</KeyIdea>
+
+## 迁移练习
+
+为传感器节点定义 `frame_id`、`topic`、`rate_hz` 和 `device_path`；写测试与生产两套 launch/YAML，验证非法频率被拒绝。列出 configure、activate、deactivate、cleanup 的资源动作，并用命令查看最终参数和生命周期状态。
+
+<Exercise
+  title="把一个 demo 节点变成可装配节点"
+  prompt="设计参数声明、范围校验、动态修改策略和四个 lifecycle 回调；为 test/robot 两种环境提供不同配置。"
+  hint="测试环境使用 fake sensor，生产环境使用设备路径；只有 active 状态才发布消息。"
+  solution={`节点在 configure 声明并校验 frame/topic/rate/path，创建 sensor 与 publisher；activate 启动传感器并激活 publisher；deactivate 停止发布；cleanup 释放资源。test launch 注入 fake 配置，robot launch 注入实际路径；动态 rate 变化若影响硬件则拒绝或要求重新 configure。`}
+/>
+
+### 用 YAML 和 launch 装配同一个节点
+
+参数的价值是让同一份二进制适配仿真、实验室设备和现场设备。配置文件应只描述环境差异，节点仍要声明默认值并验证范围。
+
+```yaml
+range_node:
+  ros__parameters:
+    topic_name: /front/range
+    frame_id: front_laser
+    publish_hz: 20.0
+    max_age_ms: 100
+```
+
+```python
+from launch_ros.actions import Node
+
+Node(
+    package="robot_sensors",
+    executable="range_node",
+    parameters=["config/range_sim.yaml"],
+    remappings=[("/scan", "/front/range")],
+)
+```
+
+运行 `ros2 launch robot_sensors range.launch.py`，再用 `ros2 param dump /range_node` 核对最终值。参数文件能被读取不等于值有效；日志应打印 topic、frame、频率和来源，但不要打印凭据或完整隐私配置。
+
+### 动态参数也必须有边界
+
+传感器阈值可以动态调节，但修改回调发生在运行时，不能让半更新的配置进入处理线程。先复制、校验、一次性提交；非法值返回失败并保留旧配置。
+
+```cpp
+on_set_parameters_callback_ = add_on_set_parameters_callback(
+  [this](const std::vector<rclcpp::Parameter>& values) {
+    rcl_interfaces::msg::SetParametersResult result;
+    result.successful = true;
+    for (const auto& p : values) {
+      if (p.get_name() == "publish_hz" && p.as_double() <= 0.0) {
+        result.successful = false;
+        result.reason = "publish_hz must be positive";
+      }
+    }
+    return result;
+  });
+```
+
+用 `ros2 param set /range_node publish_hz 10.0` 做成功与失败各一次，观察节点是否继续发布、频率是否变化以及旧值是否保持。
+
+### Lifecycle 把“进程存在”和“可服务”分开
+
+普通 node 启动即创建资源，lifecycle node 则可以处于 `unconfigured`、`inactive`、`active` 或 `finalized`。在 `on_configure` 创建 publisher、在 `on_activate` 允许输出、在 `on_deactivate` 停止输出，适合相机驱动和执行器启动前的安全检查。状态转换失败要释放已经创建的资源，不能留下半配置对象。
+
+### 配置问题的排错路径
+
+参数不生效时按“launch 文件是否被执行 → 节点名/命名空间是否匹配 → YAML 缩进和类型 → 参数是否声明 → remap 后的 topic → lifecycle 状态”顺序排查。仿真使用 `/clock` 时，还要确认定时器采用 ROS time；否则暂停仿真后 wall timer 仍可能继续发送旧数据，造成看似随机的超时。
+
+<SolutionReveal>
+  <p>当同一个二进制可以通过 launch 和参数进入测试、仿真或真实设备，配置边界才真正发挥作用。下一节会把这些参数化节点放进 TF2、URDF 和 RViz 的空间模型。</p>
+</SolutionReveal>

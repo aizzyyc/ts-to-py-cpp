@@ -1,0 +1,124 @@
+---
+id: cpp-ros-tf2
+slug: ros2-tf2-urdf-and-rviz
+title: "TF2、URDF 与 RViz"
+summary: "理解坐标系、机器人模型和可视化工具，建立传感器数据的空间直觉。"
+track: cpp
+order: 28
+durationMinutes: 22
+concepts: [tf2, urdf, rviz]
+prerequisites: [cpp-ros-params]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## TF2、URDF 与 RViz
+
+Web 页面显示 `x/y` 就足够做图，但机器人数据必须说明“在哪个坐标系、什么时刻、单位是什么”。TF2 维护坐标变换树，URDF 描述 link/joint 的机构关系，RViz 把消息和模型放在一起供人检查。三者不是独立工具：URDF 的 frame、传感器消息的 `frame_id` 和 TF 查询的目标必须一致。
+
+## 学习目标
+
+- 能从 JS/TS 的二维对象模型迁移到带 `frame_id`、单位、四元数和时间戳的机器人空间数据。
+- 能发布和查询静态/动态 TF，理解 TF buffer、查询时刻和 ROS time 对结果的影响。
+- 能用 URDF、RViz、`tf2_echo` 和 bag 回放定位坐标系断链、时间超前与轴方向错误。
+
+### 点的坐标和时间是一体的
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const point = { x: scan.x, y: scan.y, frame: "laser" };
+const worldPoint = transform(point, "map");`}
+  targetLabel="C++ / ROS 2"
+  targetLanguage="cpp"
+  target={`geometry_msgs::msg::PointStamped point;
+point.header.frame_id = "laser";
+point.header.stamp = node->get_clock()->now();
+auto base_point = tf_buffer_->transform(point, "base_link");`}
+/>
+
+查询时使用消息原始时间戳通常比用“现在”更正确；静态传感器可按明确规则使用 latest。`laser` 到 `base_link` 的方向不能凭名字猜，要从 TF 树验证。若变换在缓存时间范围外，TF2 会报告 extrapolation；这不是简单的坐标数学错误，而是数据和变换的时间不重叠。
+
+### 用 URDF 表达机构关系
+
+```xml
+<link name="base_link"/>
+<link name="laser"/>
+<joint name="laser_mount" type="fixed">
+  <parent link="base_link"/>
+  <child link="laser"/>
+  <origin xyz="0.20 0.00 0.15" rpy="0 0 0"/>
+</joint>
+```
+
+URDF 的 `origin` 只描述父子 link 关系，传感器消息仍要设置正确的 `frame_id`。旋转角、米和弧度要在团队中固定。轮式机器人还要检查关节轴方向、惯性和 collision 模型；RViz 显示的模型对了，不代表传感器时间戳或算法输出就对了。
+
+### 用 RViz 做空间诊断
+
+设置 Fixed Frame 为 `map` 或 `base_link`，打开 TF、RobotModel、LaserScan/PointCloud2 和坐标轴，逐层确认树是否连通。点云整体偏移通常检查静态变换平移，左右镜像检查轴方向/四元数，随时间抖动检查时间戳、缓存和设备时钟。RViz 是人类可视化诊断，不应替代自动检查 TF 可用性、frame 名和单位。
+
+### 常见编译、链接、运行时错误
+
+头文件找不到检查 `tf2_ros`、`geometry_msgs` 的依赖声明和 target；链接缺少转换模板支持检查库链接。运行时 `Lookup would require extrapolation` 先比较消息 stamp 与 TF buffer 时间范围；`frame does not exist` 检查 namespace、拼写和 broadcaster 是否启动。模型不显示时查 URDF install、robot_state_publisher 和 Fixed Frame。不要用 sleep 粗暴等待 TF，应使用 timeout 和可诊断错误。
+
+<KeyIdea title="空间数据的契约是 frame 加时间">
+  <p>TF2 负责在给定时间寻找变换，URDF 负责描述 link 关系，RViz 负责把证据可视化。每次排错都同时检查 frame 名、方向、时间和单位。</p>
+</KeyIdea>
+
+## 迁移练习
+
+把 `laser` 中的点转换到 `base_link`，然后在 RViz 中显示；列出 TF 是否存在、时间戳是否匹配、方向是否正确、URDF 是否安装和单位是否一致五项检查。故意把 `frame_id` 写成相似拼写，观察命令和日志如何定位。
+
+<Exercise
+  title="让一帧测距数据落在正确坐标系"
+  prompt="准备 PointStamped、设置原始 stamp，查询 laser 到 base_link 的变换，并用 URDF/RViz 验证结果；为超时和缺 frame 设计错误处理。"
+  hint="先用 tf2_echo 或 TF 图确认树，再在代码中使用有限 timeout；不要用当前时间替换历史消息时间。"
+  solution={`消息的 frame_id 设为 laser，stamp 保留采集时间，查询 base_link 并设置 timeout。若 lookup 失败记录 source/target/stamp 和错误，丢弃或进入安全策略；URDF 固定 joint 必须正确安装，RViz 用同一 Fixed Frame 检查方向与偏移。`}
+/>
+
+### 静态变换和动态变换的职责
+
+雷达安装在底盘上的外参通常是静态的，机器人底盘相对地图的位姿可能是动态的。静态发布器只应启动一次；把固定外参放进每帧回调会产生重复 TF 和难以解释的时间行为。
+
+```cpp
+geometry_msgs::msg::TransformStamped t;
+t.header.stamp = now();
+t.header.frame_id = "base_link";
+t.child_frame_id = "front_laser";
+t.transform.translation.x = 0.18;
+t.transform.rotation.w = 1.0;
+static_broadcaster_->sendTransform(t);
+```
+
+必须补齐四元数和单位检查；没有有效旋转的默认零四元数不是“没有旋转”，而是非法姿态。用 `ros2 run tf2_tools view_frames` 和 `ros2 run tf2_ros tf2_echo base_link front_laser` 检查树是否连通。
+
+### 查询变换时要同时考虑时间
+
+`lookupTransform("map", "laser", stamp)` 查询的是指定时刻的关系，不是永远最新的关系。相机、IMU 和里程计有不同延迟时，强行用 `TimePointZero` 会掩盖同步问题；查询失败时要区分 frame 不存在、时间超出缓存、未来时间和连接断开。
+
+```cpp
+try {
+  auto tf = buffer_->lookupTransform(
+    "map", "laser", tf2::TimePoint(std::chrono::nanoseconds(stamp_ns)),
+    50ms);
+  auto world = tf2::doTransform(point, tf);
+} catch (const tf2::TransformException& e) {
+  RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                       "transform unavailable: %s", e.what());
+}
+```
+
+### URDF、frame_id 与 RViz 必须一致
+
+URDF 的 link 名称是机器人模型的语义边界，消息 header 的 `frame_id` 是数据来源，RViz 的 Fixed Frame 是显示参考系。比如 URDF 使用 `laser_link` 而驱动发布 `front_laser`，TF 树即使有其它节点也无法自动猜测这是同一坐标系。用 `ros2 topic echo /scan --once` 检查 `header.frame_id`，再在 RViz 选择正确 Fixed Frame。
+
+### 典型错位如何定位
+
+机器人在 RViz 中“跳动”，先检查时间戳是否使用设备启动时间、系统时间或仿真时间；点云镜像，检查轴方向和静态旋转；只在高速度时错位，检查传感器时间延迟和 TF 缓存；地图完全空白，检查 Fixed Frame 是否位于 TF 树根。将一段 bag 在固定 `/clock` 下回放，可以把坐标错误与真实设备噪声分开。
+
+<SolutionReveal>
+  <p>TF2 的难点不是调用一个 transform，而是让消息时间、坐标树和模型描述相互一致。下一节会用 rosbag 把这些空间问题记录并离线重放。</p>
+</SolutionReveal>

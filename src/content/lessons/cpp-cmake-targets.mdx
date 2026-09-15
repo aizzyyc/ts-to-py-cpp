@@ -1,0 +1,132 @@
+---
+id: cpp-cmake-targets
+slug: cmake-targets-and-dependencies
+title: "CMake Target 与依赖边界"
+summary: "从能编译程序升级到可维护 target，掌握 include、link 和传递依赖。"
+track: cpp
+order: 15
+durationMinutes: 18
+concepts: [cmake, targets, dependencies]
+prerequisites: [cpp-io]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## CMake Target 与依赖边界
+
+`package.json` 把脚本和 npm 依赖列在一个文件里，CMake 更接近一张构建图：每个 target 有源文件、编译特性、头文件目录和链接依赖。现代写法要让依赖沿 target 传播，而不是用全局变量把整个工作区“都能 include”。这对 ROS 2 尤其重要，因为一个包里可能同时有消息库、节点库、可执行文件和测试。把构建图看懂，是 JS/TS 开发者进入 C++ 系统工程的关键一步。
+
+### 学习目标
+
+本节结束时，你能从一个可执行文件拆出可复用 library；正确使用 `PUBLIC`、`PRIVATE`、`INTERFACE`；理解 configure、compile、link 三个阶段；为测试和 ROS 2 节点声明可传递依赖；用最小命令定位“找不到包、头文件或符号”的根因。
+
+### 从脚本清单到 target 图
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`{"scripts": {"build": "tsc", "test": "vitest"}}
+// import parser from "parser-package"`}
+  targetLabel="C++"
+  targetLanguage="cpp"
+  target={`add_library(sensor_core src/sensor.cpp)
+target_include_directories(sensor_core PUBLIC include)
+add_executable(sensor_app src/main.cpp)
+target_link_libraries(sensor_app PRIVATE sensor_core)`}
+/>
+
+`PUBLIC` 表示使用者既需要当前库的 include/链接特性，依赖也要传给下游；`PRIVATE` 只影响当前 target；`INTERFACE` 没有自己的编译源文件，只提供头文件或编译特性。判断方法不是背单词，而是问“编译 sensor_app 是否需要看到这个依赖的头文件或符号”。
+
+### 从源码到可执行文件的三阶段
+
+```cmake
+cmake_minimum_required(VERSION 3.20)
+project(sensor_demo LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+add_executable(sensor_demo main.cpp)
+```
+
+`cmake -S . -B build` 只生成构建系统并检查配置；`cmake --build build` 才会编译 `.cpp` 并链接目标。头文件找不到通常发生在 compile 阶段，`undefined reference` 通常发生在 link 阶段。把阶段分开看，比把所有错误都叫“CMake 报错”更容易找到解决方案。
+
+### 一个可复用的核心库
+
+```cmake
+add_library(parser_core src/parser.cpp)
+target_include_directories(parser_core PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+target_compile_features(parser_core PUBLIC cxx_std_20)
+
+add_executable(parser_cli src/main.cpp)
+target_link_libraries(parser_cli PRIVATE parser_core)
+
+enable_testing()
+add_executable(parser_test tests/parser_test.cpp)
+target_link_libraries(parser_test PRIVATE parser_core)
+add_test(NAME parser_test COMMAND parser_test)
+```
+
+测试和 CLI 都依赖 `parser_core`，所以解析实现只写一次。第三方库应优先通过 `find_package` 找到 imported target，再用 `target_link_libraries(core PRIVATE Vendor::Driver)`；不要手写全局 `-I` 和 `-l` 字符串。ROS 2 的 `ament_target_dependencies` 也是围绕 target 传播编译和链接信息。
+
+### Public 头文件决定依赖方向
+
+```cpp
+// include/sensor/reading.hpp
+#pragma once
+#include <cstdint>
+
+namespace sensor {
+struct Reading { std::uint64_t stamp_ns{}; float range_m{}; };
+Reading clamp_reading(Reading value);
+}
+```
+
+实现文件可以使用日志库，但公共头只暴露稳定值类型；这样下游节点不会因为内部日志实现变化而重新暴露 vendor 头。若头文件直接包含第三方消息类型，依赖通常必须 `PUBLIC`；若只在 `.cpp` 中调用，设为 `PRIVATE`。这个边界影响编译时间、ABI 和以后替换驱动的成本。
+
+### Alias target 与可移植配置
+
+```cmake
+add_library(warnings INTERFACE)
+target_compile_options(warnings INTERFACE
+  $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic>)
+target_link_libraries(sensor_core PRIVATE warnings)
+```
+
+`INTERFACE` target 适合共享编译选项，而不是把所有变量写进全局作用域。跨平台选项要用 generator expression，Windows/MSVC 和 GCC 的参数不同。验证时分别在 Debug 与 Release configure，查看 `cmake --build build --verbose` 的实际命令，确认选项确实落在需要的 target 上。
+
+### 依赖传播和边界设计
+
+若头文件暴露了 `std::vector`，标准库通常是编译器内建；若暴露 vendor 的消息类型，那个依赖应是 `PUBLIC`。实现文件才使用的日志库设为 `PRIVATE`，避免所有调用方被迫链接。循环依赖说明职责边界有问题，先拆接口或把共同值类型放到更底层库，不要用链接顺序掩盖架构。
+
+### JS/TS package.json 的迁移反例
+
+不要把 `include_directories(.)` 当成 `node_modules`：它让任意 target 都能看到任意头，隐藏了真实依赖。也不要把所有库都链接到全局 `CMAKE_EXE_LINKER_FLAGS`，这会让单元测试、工具和机器人节点共享无法解释的链接环境。C++ target 必须表达“谁使用谁依赖”，这样删除一个驱动库时，编译器才能准确告诉你受影响的消费者。
+
+### 配置、编译、链接三类排错
+
+`Could NOT find` 是 CMake 配置阶段，检查 `CMAKE_PREFIX_PATH` 和包的 config 文件；`fatal error: header not found` 是编译阶段，检查 include 传播方向；`undefined reference` 是链接阶段，确认库 target 真正链接到使用者。改了 target 属性后使用旧 build 目录可能保留缓存，重新 configure 并查看 `cmake --build` 的实际命令。运行时找不到共享库则继续检查装载路径和 ABI。
+
+### 为机器人包做可重复验证
+
+先生成一个干净 build 目录，再依次执行 configure、build、test；不要用当前终端碰巧存在的 include 路径证明项目正确。验证 `parser_cli` 的输出、`parser_test` 是否能独立链接、传感器驱动是否只被节点 target 看到。CI 中固定编译器和标准版本，并把 `CMAKE_EXPORT_COMPILE_COMMANDS=ON` 生成的命令用于 clangd 和静态检查。
+
+<KeyIdea title="依赖应该沿 target 传播">
+  <p>把每个库、节点、测试都当成图上的节点，用 PUBLIC/PRIVATE/INTERFACE 描述边。这样头文件可见性、链接输入和编译选项会跟着真正的使用者走。</p>
+</KeyIdea>
+
+## 迁移练习
+
+把一个 `parser_core` library、一个 `parser_cli` executable 和一个 `parser_test` test target 拆开。给 parser 的公共头文件设置 PUBLIC include，给仅实现使用的日志库设置 PRIVATE，并用一次错误配置观察三种阶段的报错差别。
+
+<Exercise
+  title="画出解析器的 CMake 依赖图"
+  prompt="写出三个 target 及其链接方向；判断一个在公共头文件中的消息类型依赖应该是 PUBLIC 还是 PRIVATE，并让 CTest 发现测试。"
+  hint="先从消费者反推：编译 parser_cli 和 parser_test 时需要哪些头文件和符号；测试应链接 parser_core 而不是复制源文件。"
+  solution={`parser_core 提供 include 和实现；parser_cli PRIVATE 链接 parser_core；parser_test PRIVATE 链接 parser_core 并用 add_test 注册。如果公共头暴露第三方类型，该依赖是 PUBLIC；只在 parser.cpp 使用的库是 PRIVATE。`}
+/>
+
+<SolutionReveal>
+  <p>CMake 的核心不是记住命令排列，而是让构建图和代码依赖图一致。下一节会在这张图上增加可重复测试和调试配置。</p>
+</SolutionReveal>

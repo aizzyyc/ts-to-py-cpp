@@ -1,0 +1,93 @@
+---
+id: common-architecture
+slug: modularity-and-dependency-inversion
+title: "模块化与跨语言架构"
+summary: "把业务规则、IO、设备和外部服务拆开，让代码可以单独测试、替换和跨语言协作。"
+track: common
+order: 25
+durationMinutes: 16
+concepts: [architecture, modularity, dependency inversion, interop]
+prerequisites: [common-performance]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 模块化与跨语言架构
+
+AI 产品常用 Python 处理数据和模型，机器人运行时常用 C++，Web 或控制台又可能是 JS/TS。模块化的目标不是让三种语言写同样的代码，而是让职责通过稳定协议连接。好的架构先保护业务规则，再把 HTTP、文件、模型服务、设备和消息系统放到可替换的边缘。这样语言选择跟着性能、生态和部署约束变化，核心行为仍能被单元测试验证。
+
+可以把系统想成四圈：领域规则、应用用例、外部适配器、入口与组装。Python 的模型调用、C++ 的硬件驱动和 JS 的 Web handler 都属于边缘；它们依赖一个清楚的输入输出接口，而不是让领域代码反向导入 SDK。跨语言时，用 JSON/HTTP、CLI 或消息协议传递数据与错误，不要试图共享语言内部对象。
+
+### 把语言选择放在边界之后
+
+下面这段代码只保留同一个意图，重点观察输入边界、数据流和失败语义，而不是逐字符翻译。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`export async function handle(request: Request) {
+  const data = await readInput(request);
+  return render(await runModel(data));
+}`}
+  targetLabel="Python / C++"
+  targetLanguage="text"
+  target={`# Python
+def run_pipeline(source, model):
+    data = source.read()
+    return model.predict(data)
+
+// C++
+Result Controller::handle(const Input& input) {
+  return model_->predict(input);
+}`}
+/>
+
+### 依赖反转与端口适配器
+
+业务规则不应直接依赖 HTTP、文件或 ROS 2。先定义端口，例如 `Model.predict(input) -> Prediction`、`ReadingStore.read() -> Reading`，再由 Python/C++/JS 适配器实现。高层用例只依赖端口，入口负责组装具体实现；测试可以注入 fake。端口越小，跨语言协议越容易稳定，替换模型供应商或设备驱动的影响也越小。
+
+```python
+class Model:
+    def predict(self, features: list[float]) -> str:
+        raise NotImplementedError
+
+def classify(features: list[float], model: Model) -> str:
+    label = model.predict(features)
+    if not label:
+        raise ValueError("model returned an empty label")
+    return label
+
+class FakeModel(Model):
+    def predict(self, features: list[float]) -> str:
+        return "ok" if sum(features) >= 0 else "reject"
+```
+
+### 按职责而不是按语言拆分
+
+Web 层解析请求和认证，数据层做 schema/单位转换，领域层执行规则，模型适配器负责推理，设备适配器负责硬件，协议层定义跨进程消息。不要让一个 Python 服务直接知道 React 请求对象，也不要让 C++ 控制器解析任意 JSON 字符串。部署时可以把模块放在同一进程，也可以拆成服务；边界和契约先于进程数量。
+
+### 常见错误与排错思路
+
+常见错误是“共享数据库表就是共享接口”，导致三个语言组件互相依赖未声明字段；另一个是为了抽象而抽象，接口暴露了整个 SDK。排错时沿一条用例画依赖箭头，检查高层是否导入低层实现，观察单元测试是否必须启动网络或设备；若替换一个适配器需要改业务规则，说明依赖方向或数据模型仍未稳定。
+
+<KeyIdea title="把语言选择放在边界之后">
+  <p>按职责而不是按语言拆模块，才能把 JS/TS 经验真正带进 AI 与机器人系统。先定义端口、数据契约和失败语义，再选择每个适配器的语言。</p>
+</KeyIdea>
+
+## 迁移练习
+
+请完成：把一个“上传文件后调用模型再返回结果”的应用拆成 Web、数据、模型和协议四层，写出依赖方向、端口签名、一个 fake 和一个可观察性字段。
+
+<Exercise
+  title="模块化与跨语言架构练习"
+  prompt="把一个“上传文件后调用模型再返回结果”的应用拆成 Web、数据、模型和协议四层，写出依赖方向、端口签名、一个 fake 和一个可观察性字段。"
+  hint="为每层写一句职责，再列出它依赖的外部世界；领域用例不要直接导入 Web 或 SDK。"
+  solution={`Web 解析请求并生成 request_id；数据层校验大小、格式和单位；用例依赖 ModelPort.predict(features)；模型适配器连接 Python/远端服务；协议层定义 version、label、score 与错误码。FakeModel 返回固定结果，日志串联 request_id 和 model_version。`}
+/>
+
+<SolutionReveal>
+  <p>按职责而不是按语言拆模块，才能把 JS/TS 经验真正带进 AI 与机器人系统。完成后，请用 fake 跑一次核心用例，再替换成真实模型或设备适配器，确认业务代码无需改动。</p>
+</SolutionReveal>

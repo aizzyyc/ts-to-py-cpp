@@ -1,0 +1,31 @@
+---
+import { getPythonResources } from "../lib/python-resources";
+import { getCppResources } from "../lib/cpp-resources";
+
+interface Props {
+  lessonId: string;
+  track: "python" | "cpp";
+}
+
+const { lessonId, track } = Astro.props;
+const resources = track === "python" ? getPythonResources(lessonId) : getCppResources(lessonId);
+---
+
+<section class="lesson-resources" data-resource-track={track} aria-labelledby={`resources-${lessonId}`}>
+  <div class="lesson-resources-heading">
+    <span class="eyebrow">FURTHER READING</span>
+    <h2 id={`resources-${lessonId}`}>延伸阅读</h2>
+    <p>先完成本节练习，再用这些资料查阅完整 API 和真实项目组织方式。</p>
+  </div>
+  <ul class="resource-list">
+    {resources.map((resource) => (
+      <li>
+        <a href={resource.href} target="_blank" rel="noreferrer">
+          <span class="resource-title">{resource.title}<span aria-hidden="true"> ↗</span></span>
+          <span class="resource-source">{resource.source}</span>
+          <span class="resource-note">{resource.note}</span>
+        </a>
+      </li>
+    ))}
+  </ul>
+</section>

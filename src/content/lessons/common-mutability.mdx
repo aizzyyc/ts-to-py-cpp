@@ -1,0 +1,84 @@
+---
+id: common-mutability
+slug: mutability-identity-and-side-effects
+title: "可变性、身份与副作用"
+summary: "理解引用、拷贝和原地修改，避免把 JavaScript 对象直觉带进其他运行时。"
+track: common
+order: 9
+durationMinutes: 14
+concepts: [mutability, identity, side effects]
+prerequisites: [common-syntax]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 可变性、身份与副作用
+
+JavaScript 对象通过引用共享，Python 也有可变 list 和 dict，C++ 则把值、引用和指针的区别暴露在类型里。数据是否被原地修改，会影响缓存、并发和测试。迁移时应先写出所有权：调用方是否仍持有旧值，函数是否借用对象，返回结果是否拥有独立存储。没有这个约定，语法看似正确，实际可能让模型特征、机器人状态或缓存被悄悄改写。
+
+### 同一个变量名不代表同一种所有权
+
+下面这段代码只保留同一个意图，重点观察输入边界、数据流和失败语义，而不是逐字符翻译。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`function addTag(item: Item, tag: string) {
+  item.tags.push(tag);
+  return item;
+}`}
+  targetLabel="Python / C++"
+  targetLanguage="text"
+  target={`# Python
+def add_tag(item, tag):
+    item["tags"].append(tag)
+    return item
+
+// C++
+void add_tag(Item& item, std::string tag) {
+  item.tags.push_back(std::move(tag));
+}`}
+/>
+
+### 用不可变快照隔离阶段
+
+如果事件要被多个消费者读取，优先创建新对象或冻结内部模型；如果确实要原地更新，限定在一个拥有者内部，并让函数名/文档说明副作用。C++ 的 `const Item&` 表示只读借用，按值参数表示复制或移动；Python 可以用 `dataclass(frozen=True)`，JS/TS 可以使用结构化复制或只读类型，但运行时仍要防止嵌套对象被改写。
+
+```typescript
+function withTag(item: Item, tag: string): Item {
+  return { ...item, tags: [...item.tags, tag] };
+}
+
+const before = { id: "a1", tags: ["raw"] };
+const after = withTag(before, "validated");
+```
+
+### 副作用如何影响工程
+
+原地修改可能减少复制，适合明确拥有缓冲区的高频 C++ 算法；但跨线程共享同一可变对象会引入锁和竞态。Python/JS 的闭包若捕获可变列表，异步回调执行顺序会改变结果。AI 批处理可以在边界把输入转成只读批次，机器人控制状态则应区分“最新快照”和“待处理命令”，不要让消费者反向修改生产者数据。
+
+### 常见错误与排错思路
+
+最常见错误是浅拷贝：只复制外层对象，嵌套 `tags` 或 `metadata` 仍和原对象共享。排错时比较修改前后两个引用/地址，给嵌套字段打印身份，并写连续调用测试；C++ 若出现 double free 或悬空指针，检查裸指针是否表达借用还是所有权，优先改成 RAII 容器。若结果依赖测试顺序，先消除共享全局状态，再考虑加锁。
+
+<KeyIdea title="同一个变量名不代表同一种所有权">
+  <p>跨语言代码最容易出错的地方不是括号，而是对象身份和修改权限。先约定谁拥有、谁借用、谁可以改，再选择复制、引用或消息传递。</p>
+</KeyIdea>
+
+## 迁移练习
+
+请完成：设计一个给事件增加标签的函数，并决定它是原地修改还是返回新对象；列出两个消费者同时拿到该事件时，哪种选择更容易保证结果一致。
+
+<Exercise
+  title="可变性、身份与副作用练习"
+  prompt="设计一个给事件增加标签的函数，并决定它是原地修改还是返回新对象。"
+  hint="先列出调用方是否还需要旧对象，再决定 API 的契约，并检查嵌套数组是否仍共享。"
+  solution={`事件要广播给多个消费者时返回新对象，并复制 tags；单一拥有者的热路径可以原地修改，但接口要标注副作用并禁止其他线程同时借用。测试同时断言旧事件不变、新事件有标签。`}
+/>
+
+<SolutionReveal>
+  <p>跨语言代码最容易出错的地方不是括号，而是对象身份和修改权限。把所有权写进接口，才能在性能和可预测性之间做出有依据的选择。</p>
+</SolutionReveal>

@@ -1,0 +1,12 @@
+---
+interface Props {
+  total: number;
+}
+
+const { total } = Astro.props;
+---
+
+<div class="progress-indicator" aria-label="学习进度" data-progress-total={total}>
+  <span class="progress-count" data-progress-count>0/{total}</span>
+  <span class="progress-label">已完成</span>
+</div>

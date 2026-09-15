@@ -1,0 +1,90 @@
+---
+id: common-synchronization
+slug: shared-state-locks-and-queues
+title: "共享状态、锁与消息队列"
+summary: "从竞态条件出发，比较锁、不可变消息和队列三种协作方式。"
+track: common
+order: 17
+durationMinutes: 16
+concepts: [shared state, locks, queues]
+prerequisites: [common-tasks]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 共享状态、锁与消息队列
+
+JS/TS 开发者通常把状态放在对象或闭包里，event loop 让许多代码暂时不必面对同一时刻的线程写入。进入 Python 线程、C++ 多线程或机器人回调后，多个执行单元同时读写同一对象会产生竞态；队列和不可变消息往往比到处加锁更容易验证。即使 Python 有 GIL，也不能把“读—改—写”业务不变量当成自动原子操作。
+
+先明确共享状态的不变量，例如 `latest` 必须是完整的 Reading，不能让消费者读到一半更新的数据。再决定由锁保护、由单一拥有者串行处理，还是通过消息复制。锁减少复制但增加等待和死锁风险；消息隔离更清晰，却需要处理队列容量、延迟和丢弃策略。
+
+### 共享状态越少，系统越容易推理
+
+下面这段代码只保留同一个意图，重点观察输入边界、数据流和失败语义，而不是逐字符翻译。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`let latest: Reading | undefined;
+function onReading(reading: Reading) {
+  latest = reading;
+}`}
+  targetLabel="Python / C++"
+  targetLanguage="text"
+  target={`# Python
+latest = None
+lock = threading.Lock()
+with lock:
+    latest = reading
+
+// C++
+std::mutex mutex;
+std::lock_guard guard(mutex);
+latest = reading;`}
+/>
+
+### 锁保护的是不变量
+
+锁的范围应覆盖完整的读—校验—写操作，而不是只包住赋值的一行。Python 使用 `threading.Lock`，C++ 使用 `std::mutex` 和 RAII guard；两者都要避免在持锁期间调用未知的网络或用户回调。锁顺序必须固定，超时和关闭路径要释放锁。对只读快照，可以在锁内复制一份后立即解锁，让耗时推理在锁外执行。
+
+```cpp
+std::optional<Reading> Latest::get() const {
+  std::lock_guard<std::mutex> guard(mutex_);
+  return latest_; // 返回值副本，调用方不持有内部锁或引用
+}
+
+void Latest::set(Reading reading) {
+  std::lock_guard<std::mutex> guard(mutex_);
+  latest_ = std::move(reading);
+}
+```
+
+### 队列、背压与消息所有权
+
+有界队列把生产速度和消费速度的差异显式化：满时可以阻塞、丢弃最旧帧、丢弃新帧或返回错误。实时传感器常保留最新值，审计事件则通常不能丢。消息最好是不可变快照，消费者拥有出队后的对象；不要把一个可变缓冲区同时交给生产者和消费者。
+
+### 常见错误与排错思路
+
+常见错误是只给写操作加锁，读取多字段时仍看到不一致状态；另一个是持锁等待队列或网络导致整体卡住。排错时用线程 sanitizer、记录锁等待时长和队列深度，给每条消息加 sequence；若结果偶发错乱，先把共享状态改为单线程队列验证逻辑，再恢复并发。死锁则检查锁顺序和异常/取消路径是否释放资源。
+
+<KeyIdea title="共享状态越少，系统越容易推理">
+  <p>并发设计不是把单线程代码包进线程，而是重新定义共享数据的所有权；优先让消息拥有者单一、队列有界、锁保护不变量。</p>
+</KeyIdea>
+
+## 迁移练习
+
+请完成：设计一个传感器生产者和推理消费者之间的有界消息队列，选择容量、满队列策略、消息所有权和关闭信号，并写出如何观察背压。
+
+<Exercise
+  title="共享状态、锁与消息队列练习"
+  prompt="设计一个传感器生产者和推理消费者之间的有界消息队列，选择容量、满队列策略、消息所有权和关闭信号，并写出如何观察背压。"
+  hint="定义满队列时丢弃、阻塞还是覆盖旧数据，并说明理由；把队列长度和丢弃计数作为指标。"
+  solution={`实时传感器可用固定容量队列并保留最新帧，记录 dropped_total 和 queue_depth；每条消息是不可变快照。消费者停止时关闭队列，让生产者收到 closed 而退出；若消息不可丢，则阻塞生产者并设置最大等待时间。`}
+/>
+
+<SolutionReveal>
+  <p>并发设计不是把单线程代码包进线程，而是重新定义共享数据的所有权。完成后，请用一个慢消费者测试容量上限和关闭路径，确认没有线程永久等待。</p>
+</SolutionReveal>

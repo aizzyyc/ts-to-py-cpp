@@ -1,0 +1,30 @@
+---
+import type { LessonMeta } from "../lib/lessons";
+
+interface Props {
+  currentLessonId: string;
+  previous?: LessonMeta;
+  next?: LessonMeta;
+}
+
+const { currentLessonId, previous, next } = Astro.props;
+---
+
+<div class="lesson-nav">
+  <button class="button complete-button" type="button" data-complete-lesson={currentLessonId}>
+    <span class="complete-icon" aria-hidden="true">✓</span>
+    <span data-complete-label>标记为已完成</span>
+  </button>
+  <div class="lesson-nav-links">
+    {previous ? (
+      <a class="nav-link previous" href={`/learn/${previous.track}/${previous.slug}`}>
+        <span aria-hidden="true">←</span><span><small>上一节</small>{previous.title}</span>
+      </a>
+    ) : <span></span>}
+    {next && (
+      <a class="nav-link next" href={`/learn/${next.track}/${next.slug}`}>
+        <span><small>下一节</small>{next.title}</span><span aria-hidden="true">→</span>
+      </a>
+    )}
+  </div>
+</div>

@@ -1,0 +1,241 @@
+---
+id: python-datasets
+slug: dataset-splits-and-leakage
+title: "数据集切分、泄漏与可复现"
+summary: "区分训练、验证和测试数据，识别 data leakage 并固定随机性。"
+track: python
+order: 22
+durationMinutes: 18
+concepts: [datasets, leakage, reproducibility]
+prerequisites: [python-scikit]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+本节把“随机切一刀”升级为可解释的数据集治理。完成后你能够：
+
+- 说明 train、validation、test 各自允许做什么，避免反复使用测试集调参。
+- 根据样本的时间、用户、设备或会话关系选择随机、分组和时间切分。
+- 找出标签、聚合统计、重复样本和预处理带来的 data leakage。
+- 固定 seed、输入排序和数据版本，让同一实验能重跑并解释差异。
+
+## 从 JS/TS 迁移的心智模型
+
+JavaScript/TypeScript 测试常用 fixture、snapshot 和随机数据生成器；AI 数据集则是模型学习规则的边界。把同一个用户的相邻录音分别放进 train 和 test，模型可能记住说话人而不是学会唤醒词。把全量数据的均值、目标编码或未来标签先算好，再切分，也会让测试信息穿过管线。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const shuffled = shuffle(samples, 42);
+const train = shuffled.slice(0, 800);
+const test = shuffled.slice(800);`}
+  targetLabel="Python / datasets"
+  targetLanguage="python"
+  target={`train, valid, test = split_by_time_group(
+    samples, group_key="device_id", seed=42
+)`}
+/>
+
+<KeyIdea title="切分规则是实验协议">
+  <p>数据怎么进入 train、validation、test，和模型结构一样重要。先定义可泛化的未来场景，再选择切分器。</p>
+</KeyIdea>
+
+## train、validation、test 的职责
+
+train 用来拟合模型参数和只依赖训练数据的预处理统计量；validation 用来选模型、超参数、阈值和早停轮次；test 在协议冻结后只用于一次最终估计。test 不是“更大的 validation”，也不是调到满意为止的排行榜。
+
+先写样本单位。对一条独立传感器窗口，样本 ID 可以是 event_id；对同一用户的多条窗口，泛化单位更可能是 user_id；对按天预测，未来的一天不能混入过去训练。报告每个 split 的行数、正负比例、时间范围、group 数量和 feature shape。
+
+### 示例一：先建立不可变的 split manifest
+
+```python
+from dataclasses import asdict, dataclass
+import hashlib
+import json
+
+@dataclass(frozen=True)
+class SplitSpec:
+    seed: int
+    strategy: str
+    group_key: str | None
+    data_version: str
+
+spec = SplitSpec(seed=42, strategy="group", group_key="device_id", data_version="events-v3")
+payload = json.dumps(asdict(spec), sort_keys=True)
+split_id = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+print({"split_id": split_id, **asdict(spec)})
+```
+
+运行结果里的 split_id 由规则和数据版本共同决定。真正的实现还应把输入文件哈希、库版本和样本排序规则加入 manifest；这样同一 seed 但数据文件发生变化时，不会误以为是模型代码导致结果变化。
+
+## 随机、分组与时间切分
+
+类别近似平衡且样本相互独立时，可以使用 stratified random split。若同一设备、用户、病人或会话产生多条相关样本，应让整个 group 只属于一个 split，用 GroupShuffleSplit、GroupKFold 或 StratifiedGroupKFold。否则模型会从同一设备的背景噪声中获益，离线指标高、换设备就失败。
+
+时间任务要先排序，再用过去训练、较近验证、未来测试。随机打乱会把未来分布泄漏进训练；即使标签没有未来信息，设备固件更新和环境季节也会让随机分布与上线场景不符。时间窗口相邻时，还要考虑间隔或 purge，避免窗口重叠导致近乎重复。
+
+### 示例二：按 group 和时间分别切分
+
+```python
+import pandas as pd
+from sklearn.model_selection import GroupShuffleSplit
+
+frame = frame.sort_values(["timestamp", "device_id", "event_id"], kind="stable")
+groups = frame["device_id"]
+
+splitter = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+train_index, test_index = next(splitter.split(frame, groups=groups))
+train = frame.iloc[train_index].copy()
+test = frame.iloc[test_index].copy()
+
+assert set(train["device_id"]).isdisjoint(set(test["device_id"]))
+print({
+    "train_rows": len(train),
+    "test_rows": len(test),
+    "train_groups": train["device_id"].nunique(),
+    "test_groups": test["device_id"].nunique(),
+})
+```
+
+这个例子验证的是设备外泛化，不是时间外推；两种目标不能混写。若产品目标是未来同一设备，按 group 全分开反而可能过于严格，应该使用时间切分并在同一设备内隔离未来。切分器的选择必须来自上线问题，而不是哪个分数更高。
+
+## data leakage 的路径
+
+常见泄漏有四条：
+
+1. 目标泄漏：特征直接或间接由 label、人工审核结果或未来状态计算。
+2. 时间泄漏：用未来窗口统计量、未来日志或发布日期之后的字段预测过去。
+3. 关系泄漏：同一 user/device/session 的近重复样本跨 split。
+4. 预处理泄漏：先在全量数据拟合均值、词表、异常阈值、特征选择或编码器。
+
+解决办法不是把 test 删除，而是把依赖数据的 fit 放进训练 fold，再用 transform 处理其他 split。对每个聚合特征记录窗口起止时间；对每个编码器记录 fit 的 row 数；对重复检测保留被合并的 ID。若无标签时无法确认泄漏，先把风险写入实验限制，不要宣称指标代表真实上线效果。
+
+### 示例三：验证预处理只看训练集
+
+```python
+from sklearn.preprocessing import StandardScaler
+
+scaler = StandardScaler()
+x_train = scaler.fit_transform(train[feature_names])
+x_valid = scaler.transform(valid[feature_names])
+x_test = scaler.transform(test[feature_names])
+
+print({
+    "train_shape": x_train.shape,
+    "valid_shape": x_valid.shape,
+    "test_shape": x_test.shape,
+    "fit_samples": scaler.n_samples_seen_,
+})
+assert x_train.shape[1] == len(feature_names)
+assert x_valid.shape[1] == x_train.shape[1]
+```
+
+如果你在切分前执行 scaler.fit_transform(all_features)，验证集均值和方差会影响模型参数；即使指标只上升一点，也已经改变实验含义。把 scaler 放进 scikit-learn Pipeline 或 PyTorch 的训练数据初始化中，才能让交叉验证的每个 fold 获得独立的 fit。
+
+## 可复现：seed 只是起点
+
+固定 seed 不等于完全可复现。还要固定输入排序、切分算法、版本、数据文件、特征列顺序、worker 随机性和硬件确定性选项。GPU 算子可能为了性能使用非确定实现；分布式训练还要记录 rank 和 sampler 状态。报告“可复现”时说明允许的数值误差和未固定的因素。
+
+运行前保存命令行参数与 resolved config，运行后保存 split manifest、样本计数和每个 split 的哈希。不要只在日志中打印 seed；日志可能被截断，且无法证明数据版本没有变化。
+
+## 运行、输出与验证
+
+一次切分脚本至少输出：
+
+```python
+def describe_split(name, part):
+    return {
+        "name": name,
+        "rows": int(len(part)),
+        "groups": int(part["device_id"].nunique()),
+        "time_min": str(part["timestamp"].min()),
+        "time_max": str(part["timestamp"].max()),
+        "positive_rate": float((part["label"] == 1).mean()),
+    }
+
+manifest = [describe_split("train", train), describe_split("valid", valid)]
+print(manifest)
+assert len(train) > 0 and len(valid) > 0 and len(test) > 0
+assert train["event_id"].is_unique
+assert valid["event_id"].is_unique
+assert test["event_id"].is_unique
+```
+
+结果检查要包括 group 是否交叉、时间范围是否符合目标、标签是否缺失、每个 split 是否有足够的正例，以及重复 event_id 是否为零。若切分失败，先修复样本单位和排序，再调整 test_size；不要为了让模型能训练而把同一组硬塞进不同集合。
+
+## 常见错误、排错与调试
+
+- 测试集指标被反复“优化”：查看提交历史和 manifest，冻结 test 后另建 validation 或 nested CV。
+- 指标异常完美：查重复 ID、同一 group 跨 split、标签派生列、全量 scaler 和未来聚合。
+- 某个 split 没有正例：检查分层条件、时间窗口和样本量，明确这是数据不足还是任务本身稀有。
+- 每次运行行数不同：固定输入排序、random_state、过滤顺序和缺失处理；比较 split_id。
+- 训练集与线上分布差异大：检查时间、设备、版本、采样策略和是否把测试观察反向用于调参。
+- 训练结果仍不一致：记录 NumPy/PyTorch/sklearn 版本、CPU/GPU、DataLoader worker seed 和 deterministic 设置。
+
+## 练习与任务
+
+为传感器唤醒数据设计三种评估协议：随机分层、按设备分组、按时间前进。对每种协议写清样本单位、train/validation/test 规则、可使用的特征统计和风险；实现一个 split 函数返回数据与 manifest，并证明没有 group 交叉和重复 event_id。
+
+<Exercise
+  title="数据集切分练习"
+  prompt="实现 split_dataset(frame, strategy, seed=42)，支持 random、group、time；返回 train、valid、test、manifest。manifest 要包含数据版本、seed、行数、group 数、时间范围和 split 哈希。"
+  hint="先 stable sort；random 使用分层，group 使用 GroupShuffleSplit，time 使用按时间排序的切片；切分后做 disjoint 断言。"
+  solution={`frame = frame.sort_values(["timestamp", "device_id", "event_id"], kind="stable")
+train = frame.iloc[:int(len(frame) * 0.6)]
+valid = frame.iloc[int(len(frame) * 0.6):int(len(frame) * 0.8)]
+test = frame.iloc[int(len(frame) * 0.8):]
+assert set(train.event_id).isdisjoint(set(valid.event_id))
+assert set(valid.event_id).isdisjoint(set(test.event_id))
+return train, valid, test`}
+/>
+
+### 完整答案
+
+```python
+def validate_parts(parts):
+    train, valid, test = parts
+    ids = [set(part["event_id"]) for part in parts]
+    if any(not part["event_id"].is_unique for part in parts):
+        raise ValueError("event_id must be unique inside every split")
+    if ids[0] & ids[1] or ids[0] & ids[2] or ids[1] & ids[2]:
+        raise ValueError("event_id overlaps between splits")
+    if train.empty or valid.empty or test.empty:
+        raise ValueError("all splits must be non-empty")
+    return {
+        name: {
+            "rows": int(len(part)),
+            "groups": int(part["device_id"].nunique()),
+            "positive_rate": float(part["label"].mean()),
+        }
+        for name, part in zip(("train", "valid", "test"), parts)
+    }
+
+def time_split(frame):
+    ordered = frame.sort_values(
+        ["timestamp", "device_id", "event_id"], kind="stable"
+    ).reset_index(drop=True)
+    n = len(ordered)
+    parts = (ordered.iloc[: int(n * 0.6)],
+             ordered.iloc[int(n * 0.6): int(n * 0.8)],
+             ordered.iloc[int(n * 0.8):])
+    return parts, validate_parts(parts)
+```
+
+真实的 group split 还要在 group 层选择边界，不能只把按时间切好的行再声称设备独立。答案的重点是可验证的契约：你能从 manifest 看出数据怎么切、为什么切，以及结果是否能在同一版本上重跑。
+
+<SolutionReveal>
+  <p>当指标变化时，先比较 split manifest 和数据版本，再比较模型参数。防止泄漏通常比增加一个更深的网络更能提升可信度。</p>
+</SolutionReveal>
+
+## 与同一 AI 项目主线的连接
+
+pandas 清洗出 event_id、device_id 和 timestamp，NumPy 再把同一批次转成固定 shape；本节把这些字段变成评估协议。scikit-learn Pipeline、PyTorch Dataset 和项目 CLI 都必须读取同一份 split manifest。只有 train 统计量能进入预处理，validation 才能负责选择模型，test 才能保留为一次性证据；模型后续的 checkpoint、推理版本和漂移监控也应引用相同 data_version。
+
+## 小结
+
+数据集切分不是文件操作，而是对未来使用场景的模拟。先定义样本和泛化单位，再选择分层、分组或时间规则；把预处理 fit 限制在训练数据；记录 seed、排序、版本和 split 统计；最后用交叉 ID、时间范围、标签比例和哈希验证。没有这些边界，漂亮的模型指标可能只是 data leakage 的回声。

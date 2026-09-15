@@ -1,0 +1,147 @@
+---
+id: cpp-ros-topics
+slug: ros2-nodes-topics-and-qos
+title: "ROS 2 Node、Topic 与 QoS"
+summary: "写出发布和订阅节点，理解消息流、队列深度和 QoS 对传感器数据的影响。"
+track: cpp
+order: 25
+durationMinutes: 20
+concepts: [ros2, nodes, topics, qos]
+prerequisites: [cpp-ros-workspace]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## ROS 2 Node、Topic 与 QoS
+
+事件总线和 WebSocket 能帮助理解“有人发布、有人订阅”的流，但 ROS 2 节点还拥有参数、时钟、执行器和资源生命周期。Topic 是按名称和消息类型连接的持续流，不是一次函数调用；发布者与订阅者还必须有可兼容的 QoS。写节点时先划分回调职责，再决定哪些工作留在 executor 线程。
+
+## 学习目标
+
+- 能用 `rclcpp` 创建 publisher、subscription 和 timer，解释 Node 如何持有这些资源。
+- 能把 JS/TS 的 event handler 迁移成带消息类型、QoS、时间戳和 executor 约束的 ROS 2 回调。
+- 能用 CLI 和日志区分“没有发布者、类型不匹配、QoS 不兼容、回调阻塞”四类故障。
+
+### Node 是资源和回调的容器
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`eventBus.on("scan", scan => update(scan));
+eventBus.emit("scan", scan);
+const unsubscribe = bus.on("scan", handler);`}
+  targetLabel="C++ / ROS 2"
+  targetLanguage="cpp"
+  target={`subscription_ = create_subscription<Scan>(
+  "/scan", rclcpp::SensorDataQoS(),
+  [this](Scan::ConstSharedPtr scan) { handle(*scan); });
+publisher_->publish(scan);`}
+/>
+
+订阅对象通常是 node 的成员，让它和 node 同时销毁；lambda 捕获 `this` 时确认 node 还活着。`ConstSharedPtr` 表达回调只读借用消息，重计算不要直接堵住 executor。发布者也不是全局函数：它持有 topic、类型支持和 QoS，资源关闭时要先停止新消息再析构。
+
+### 一个轻量的传感器回调
+
+```cpp
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/range.hpp>
+
+class RangeNode : public rclcpp::Node {
+public:
+  RangeNode() : Node{"range_node"} {
+    subscription_ = create_subscription<sensor_msgs::msg::Range>(
+      "/scan", rclcpp::SensorDataQoS(),
+      [this](sensor_msgs::msg::Range::ConstSharedPtr msg) {
+        if (std::isfinite(msg->range)) latest_range_ = msg->range;
+      });
+  }
+private:
+  rclcpp::Subscription<sensor_msgs::msg::Range>::SharedPtr subscription_;
+  double latest_range_{0.0};
+};
+```
+
+示例中的 `std::isfinite` 需要 `<cmath>`；生产代码还要明确 `latest_range_` 是否只在 executor 线程访问，若另一个线程读取就需消息传递或同步。订阅回调只做轻量校验和入队，点云滤波、文件写入等工作交给有界 worker，避免阻塞其它回调。
+
+### QoS 和执行器决定是否收到
+
+可靠性、历史策略、深度、持久性和 deadline 共同构成通信契约。传感器通常使用 `SensorDataQoS`，允许丢旧样本来保持新鲜；配置事件可能选择 reliable。单线程 executor 易于保护局部状态，多线程 executor 需要为共享字段设计同步。Topic 同名不代表连通，先用 `ros2 topic info --verbose /scan` 查看端点和 QoS。
+
+### 常见编译、链接、运行时错误
+
+编译找不到 `Range` 头文件，检查 `sensor_msgs` 的 manifest、`find_package` 和 ament target；链接缺少类型支持时检查 target 依赖。节点启动却没有回调，先查 topic 名称、命名空间、消息类型和 QoS 兼容性，不要先改 lambda。运行时回调偶发崩溃，检查 `this` 生命周期和跨线程的 `latest_range_`；频率变低则记录 callback duration、executor 数和队列深度。
+
+<KeyIdea title="Topic 契约包含类型、QoS 和回调时间">
+  <p>发布和订阅只是表面 API；真正的连接还需要相同消息类型、可兼容 QoS 和不会阻塞 executor 的处理策略。</p>
+</KeyIdea>
+
+## 迁移练习
+
+设计 `/scan` 订阅者：使用传感器 QoS，回调记录消息时间戳和本地接收时间，只把有效值放入有界队列；独立处理阶段统计频率、输入年龄和丢弃数。用两个不同 QoS 的 publisher/subscriber 验证“发现了端点但收不到数据”的情况。
+
+<Exercise
+  title="让一个 /scan 节点可观察"
+  prompt="写出 Node、订阅者和轻量回调的结构，并列出验证 topic 类型、QoS、时间戳和 executor 行为的命令或日志字段。"
+  hint="用 ros2 topic info --verbose 检查端点；回调不要做阻塞 I/O；按 message stamp 与 steady_clock 分别测数据年龄和处理延迟。"
+  solution={`订阅使用 rclcpp::SensorDataQoS，回调检查 finite、记录 count 与 age 后移动/复制必要字段入有界队列。用 ros2 topic list/type/info 确认名称和类型；若 QoS 不兼容，调整发布或订阅策略并记录 deadline/丢弃统计。`}
+/>
+
+### 用 timer 发布一条可验证的消息
+
+订阅只是接收端，初学时还需要一个确定的 publisher 才能把“消息有没有到达”与“算法是否正确”分开。下面的最小节点每 100 ms 发布递增序号；`rclcpp::WallRate` 不应被拿来代替 ROS clock，真实系统需要用消息时间和系统单调时钟分别测量数据年龄与处理耗时。
+
+```cpp
+class Heartbeat : public rclcpp::Node {
+public:
+  Heartbeat() : Node("heartbeat") {
+    publisher_ = create_publisher<std_msgs::msg::UInt64>(
+      "/demo/heartbeat", rclcpp::QoS(10).reliable());
+    timer_ = create_wall_timer(100ms, [this] {
+      std_msgs::msg::UInt64 msg;
+      msg.data = ++sequence_;
+      publisher_->publish(msg);
+      RCLCPP_DEBUG(get_logger(), "published sequence=%lu", msg.data);
+    });
+  }
+private:
+  rclcpp::Publisher<std_msgs::msg::UInt64>::SharedPtr publisher_;
+  rclcpp::TimerBase::SharedPtr timer_;
+  std::uint64_t sequence_{0};
+};
+```
+
+编译目标要链接 `rclcpp` 和 `std_msgs`，运行后用 `ros2 topic echo /demo/heartbeat` 观察序号，用 `ros2 topic hz /demo/heartbeat` 检查频率。若日志有发布但 echo 没有数据，优先检查类型和 QoS；不要先怀疑 `publish()`。
+
+### 消息生命周期和 executor 边界
+
+`SharedPtr` 是 ROS 2 消息缓冲的共享所有权，回调结束后消息可能被释放；不能把 `msg.get()` 保存到成员里等待下次处理。需要异步处理时，复制必要字段到自己的值类型，或保存一个明确拥有所有权的 `std::shared_ptr<const Message>`，并给队列设置容量。单线程 executor 中“回调不重入”只是当前配置的结果，多线程 executor 下两个回调可能同时更新缓存，必须用互斥量、单独 worker 或消息传递解决。
+
+### 端点发现与运行证据
+
+把启动成功当成系统成功是不够的。按下面顺序收集证据：
+
+```bash
+ros2 node list
+ros2 node info /range_node
+ros2 topic type /scan
+ros2 topic info --verbose /scan
+ros2 topic hz /scan
+ros2 topic echo --qos-reliability best_effort /scan
+```
+
+记录 publisher/subscriber 数量、消息类型、可靠性、历史深度、收到的序号和最近时间戳。这样可以区分“没有发布者”“类型不一致”“QoS 不兼容”“回调太慢导致旧消息堆积”四种完全不同的问题。
+
+### 从传感器流到可测试处理器
+
+真实激光雷达、IMU 和相机通常是高频 producer，算法节点是 consumer。先在回调里验证 `finite`、`frame_id` 和时间戳，再把小的不可变数据放入有界队列；滤波和推理不要直接阻塞 DDS 回调。单元测试可以直接调用 `handle()`，集成测试再用一个 fake publisher 验证 topic、QoS 和 executor 的组合。
+
+### 常见错误与调试路径
+
+`ros2 topic echo` 没输出时，先执行 `ros2 topic type` 和 `ros2 topic info --verbose`，再比较消息类型与 reliability；回调偶发崩溃时，检查异步队列是否保存了悬空指针；频率下降时，记录 callback duration 和 queue depth。不要把增加队列深度当成处理变快，也不要用全局变量绕过 Node 的生命周期。
+
+<SolutionReveal>
+  <p>ROS 2 topic 的可学习模型是“Node 持有资源，Topic 传递类型化流，QoS 决定连接，executor 决定回调时间”。下一节将把短请求和长任务拆成 service 与 action。</p>
+</SolutionReveal>

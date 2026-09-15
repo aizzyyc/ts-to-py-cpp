@@ -1,0 +1,202 @@
+---
+id: python-iterators
+slug: iterators-generators-and-context-managers
+title: "迭代器、生成器与上下文管理"
+summary: "理解 Python 如何延迟处理数据，并用 with 安全管理文件和外部资源。"
+track: python
+order: 5
+durationMinutes: 16
+concepts: [iterators, generators, context manager, streaming]
+prerequisites: [python-oop]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+完成本节后，你应该能区分 iterable、iterator 和 generator；能用 `iter`、`next`、`yield` 解释数据何时被读取；能用 `with` 管理文件等资源；能写一个带坏行计数和定长 batch 的流式管线；能通过运行输出判断生成器是否被消费、文件是否按预期关闭。
+
+## 从 JS/TS 迁移的心智模型
+
+JavaScript/TypeScript 的数组、字符串和 generator 都实现 iterable 协议，`for...of` 会不断读取迭代结果。Python 的 `for item in source` 也不是索引循环，而是先调用 `iter(source)` 得到 iterator，再反复调用 `next(iterator)`；没有下一项时由 `StopIteration` 结束。一个 `list` 是可重复遍历的 iterable，`iter(list)` 得到的 iterator 通常只能向前走一次。
+
+带 `yield` 的 Python 函数调用时不会立即跑完函数体，而是返回 generator。每次消费者请求下一项，执行才从上一次 `yield` 之后继续。惰性主要改变内存占用和执行时机，不保证单条处理更快；对大 JSONL、日志和模型批次，它能形成“读一条、校验一条、交给下游一条”的背压。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`function* chunks(rows: Row[], size: number) {
+  for (let i = 0; i < rows.length; i += size) {
+    yield rows.slice(i, i + size);
+  }
+}`}
+  targetLabel="Python"
+  targetLanguage="python"
+  target={`def chunks(rows, size):
+    for start in range(0, len(rows), size):
+        yield rows[start:start + size]`}
+/>
+
+### iterable、iterator 与 next
+
+可迭代对象的重点是“可以产生一个 iterator”；iterator 的重点是“记住当前进度并提供下一项”。你可以对同一个 list 创建两个独立 iterator，也可以把同一个 iterator 交给两个消费者而让它们共享进度。`next(iterator, default)` 可以在结束时返回默认值，但对必须完整读取的数据，捕获 `StopIteration` 或直接使用 `for` 更不容易吞掉问题。
+
+```python
+values = [10, 20]
+cursor = iter(values)
+print(next(cursor))
+print(next(cursor))
+print(next(cursor, "finished"))
+print(list(cursor))
+```
+
+输出依次是 `10`、`20`、`finished` 和 `[]`。最后的空列表不是输入为空，而是 iterator 已经被消费完。调试一个 batch 数为零的问题时，先确认上游是不是已经在打印或计算长度时消耗过一次。
+
+### 示例一：yield 把执行暂停在数据边界
+
+```python
+def squared(values):
+    print("generator started")
+    for value in values:
+        print("produce", value)
+        yield value * value
+
+stream = squared([1, 2, 3])
+print("created")
+print(next(stream))
+print(list(stream))
+```
+
+运行输出的顺序是 `created`、`generator started`、`produce 1`、`1`、`produce 2`、`produce 3`、`[4, 9]`。这证明创建 generator 没有处理全部输入，第一次 `next` 才启动函数体；`list(stream)` 消费剩余数据，之后再读就是空流。
+
+### 生成器用于数据过滤和批处理
+
+生成器可以把多个步骤串起来：第一层读取，第二层校验，第三层分 batch。每一层都只保留当前需要的对象；如果下游模型变慢，上游自然会停在下一个 `yield`，而不是无限读取文件。异常也会延迟到消费阶段，因此堆栈中的真正触发点可能在 `for` 循环，而不是创建 generator 的那一行。
+
+```python
+def valid_events(lines):
+    import json
+
+    for line_number, line in enumerate(lines, start=1):
+        try:
+            event = json.loads(line)
+            value = float(event["value"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            print("skip line", line_number)
+            continue
+        yield {"id": event["id"], "value": value}
+
+data = '{"id":"a","value":1}\nnot-json\n{"id":"b","value":2}\n'
+print(list(valid_events(data.splitlines())))
+```
+
+输入含两条合法 JSON 和一条坏行，输出会包含 `skip line 2`，最终记录为 `[{'id': 'a', 'value': 1.0}, {'id': 'b', 'value': 2.0}]`。真实管线应将跳过计数返回或记录到指标，而不是只打印一句话。
+
+### with：用上下文管理资源
+
+JavaScript 常用 `try/finally` 关闭文件、数据库连接或锁；Python 的 `with` 调用上下文管理器的 `__enter__` 和 `__exit__`，即使代码块抛出异常也会执行清理。文件应该由拥有它的函数打开和关闭，调用者只接收记录或 generator。`with open(..., encoding="utf-8")` 同时表达了生命周期和中文文本的编码契约。
+
+```python
+from pathlib import Path
+
+path = Path("events.jsonl")
+path.write_text('{"id":"a"}\n', encoding="utf-8")
+with path.open(encoding="utf-8") as handle:
+    first_line = handle.readline().strip()
+print(first_line)
+print(handle.closed)
+```
+
+结果为 `{"id":"a"}` 和 `True`。离开 `with` 之后再使用 `handle` 读取会报 `ValueError: I/O operation on closed file`，这不是故障，而是资源边界已经生效。示例在真正脚本中可替换为输入路径，但不要省略编码。
+
+### 自定义 context manager 与统计
+
+`contextlib.contextmanager` 可以把准备、`yield` 中的主体工作和清理写在一个函数里。下面让流式管线在进入时创建统计字典，在退出时输出统计；`finally` 保证异常时也能记录。这个模式适合临时目录、事务和 GPU 推理模式，但不应该把无限重试藏在清理阶段。
+
+```python
+from contextlib import contextmanager
+
+@contextmanager
+def count_stage(name: str):
+    stats = {"read": 0, "kept": 0}
+    print("start", name)
+    try:
+        yield stats
+    finally:
+        print("finish", name, stats)
+
+with count_stage("validate") as stats:
+    stats["read"] = 3
+    stats["kept"] = 2
+```
+
+输出先是 `start validate`，退出时是 `finish validate {'read': 3, 'kept': 2}`；如果主体抛异常，`finish` 仍会出现，生产日志还应记录异常类型和 job id。
+
+## 运行验证：输入、输出与消费次数
+
+运行生成器示例时，按顺序验证：创建 generator 是否立刻执行、第一次 `next` 产生哪条、全部消费后的结果是否为空、文件离开 `with` 后是否关闭。可以用 `python iterators_demo.py` 运行，也可以用很小的 `StringIO` 输入验证坏行。对于大文件，不要为了“看一眼”直接 `list(generator)`；只取前两条或在 generator 内增加计数。若 batch 数异常，打印输入行号、yield 次数、保留数和丢弃数，先排除 iterator 已耗尽，再检查过滤条件。
+
+## 常见错误与排错路径
+
+- 把 iterable 和 iterator 当成同一个东西：list 可以重新 `iter`，iterator 的当前位置不会自动重置。需要两个消费者时创建两个 iterator 或重新创建 generator。
+- 调试时先 `list(stream)`：这会一次性读取全部数据并耗尽 stream。改用 `itertools.islice` 取少量样本，或重新创建 stream。
+- 把 `yield` 写成 `return`：`return` 会结束整个函数，`yield` 才会在下一次消费时恢复执行。
+- 异常看起来“不在创建处”：生成器主体在消费时运行，沿着触发 `for`、`next` 或 `list` 的调用栈排错。
+- 文件没有关闭：搜索所有 `open(`，确认它位于 `with` 中；不要把裸 file handle 跨函数传递而不说明拥有者。
+- 中文乱码：明确 `encoding="utf-8"`，并记录坏行号；不要用系统默认编码赌部署机器设置。
+- batch 永不产生：检查 `size` 是否大于零、是否在达到大小后清空 batch、循环结束后是否 yield 最后一批不足量的数据。
+- 生成器里连接 HTTP 后无法取消：把客户端生命周期放在外层 `with`，在 `finally` 中释放资源，避免消费者停止后连接泄漏。
+
+## 练习：流式读取并分批
+
+实现 `read_batches(path, size)`：逐行读取 JSONL，跳过格式错误、缺少 `value` 或 `value` 不能转换为数字的行；每 `size` 条产生一个列表，最后不足一批也要产生；函数结束时文件必须关闭。每批记录保留 `id` 和转换后的浮点 `value`，坏行至少保留行号供调试。
+
+<KeyIdea title="生成器把内存压力转成执行时机">
+  <p>延迟处理适合大数据，但消费者必须真正迭代它。把资源放进 with，并为坏输入保留行号和计数，流式管线才可观察；惰性是生命周期设计，不只是一个 yield 关键字。</p>
+</KeyIdea>
+
+### 提示
+
+先检查 `size > 0`，否则调用者传入零时应立即失败。维护当前 batch，达到 size 时 `yield` 并清空；循环结束后再判断是否有剩余。`with open(..., encoding="utf-8")` 要包住整个读取过程，而不是只包住第一行。
+
+### 完整答案
+
+<Exercise
+  title="迭代器、生成器与上下文管理练习"
+  prompt="写一个生成器从 JSONL 产生定长 batch；坏 JSON、缺少 value 或非数字 value 跳过，使用 with open(..., encoding='utf-8')，最后返回不满 size 的 batch。"
+  hint="维护当前 batch，达到 size 时 yield 并清空；循环结束后判断 batch 是否为空，并在 size 小于等于零时抛出 ValueError。"
+  solution={`import json
+
+def read_batches(path, size):
+    if size <= 0:
+        raise ValueError("size must be positive")
+    batch = []
+    with open(path, encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            try:
+                row = json.loads(line)
+                item = {"id": row["id"], "value": float(row["value"])}
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                continue
+            batch.append(item)
+            if len(batch) == size:
+                yield batch
+                batch = []
+    if batch:
+        yield batch`}
+/>
+
+<SolutionReveal>
+  <p>用五行输入、size=2 验收时，应得到两批：第一批两条，第二批一条；坏 JSON 不应让 generator 无上下文地崩溃。再在 Windows 或 Linux 上尝试删除输入文件，确认读取结束后句柄已由 with 关闭。</p>
+</SolutionReveal>
+
+## 与后续 AI 数据工程的连接
+
+训练数据常以 JSONL、日志或对象存储流出现，生成器可以把解析、校验、去重和分 batch 串成低内存流水线；`with` 确保文件、数据库或 HTTP 客户端的生命周期在异常和取消时都可控。模型服务也可以用迭代器消费请求队列，但要明确一次请求是否允许重复读取，以及背压是否会影响超时。后面的文件、打包和测试课程会把这些边界变成可复现、可回归的工程接口。
+
+## 小结
+
+iterator 记录下一项，generator 延迟产生，`with` 管理资源。理解执行何时发生、数据何时被消耗、资源何时释放，才能写出既省内存又可排错的 AI 数据读取和批处理代码。

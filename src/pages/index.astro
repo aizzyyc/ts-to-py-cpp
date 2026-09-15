@@ -1,0 +1,68 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import { LESSONS } from "../lib/lessons";
+
+const totalLessons = LESSONS.length;
+---
+
+<BaseLayout>
+  <section class="hero">
+    <div class="page-container hero-grid">
+      <div>
+        <span class="eyebrow">A FASTER WAY TO GO POLYGLOT</span>
+        <h1>把熟悉的 <em>JS/TS</em>，变成新的工程能力。</h1>
+        <p class="hero-lead">为已经会做项目的开发者设计。用你熟悉的语言做参照，快速进入 Python、C++，再走向 AI 和机器人。</p>
+        <div class="hero-actions">
+          <a class="button button-dark" href="/learn">开始探索路线 <span aria-hidden="true">↗</span></a>
+          <a class="button button-light" href="#method">了解学习方法</a>
+        </div>
+        <p class="hero-note">{totalLessons} 节短课 · 中文解释 · 每节 8–18 分钟 · 本地保存进度</p>
+        <div class="hero-stats" aria-label="网站特点">
+          <div class="hero-stat"><strong>{totalLessons}</strong><span>节迁移课程</span></div>
+          <div class="hero-stat"><strong>2</strong><span>条行业路线</span></div>
+          <div class="hero-stat"><strong>0</strong><span>无意义的绕路</span></div>
+        </div>
+      </div>
+      <div class="hero-visual" aria-label="JavaScript、Python 和 C++ 连接到 AI 与机器人的抽象插图">
+        <div class="visual-orbit"></div>
+        <div class="visual-core"><span>→</span></div>
+        <div class="float-label python">Python / AI</div>
+        <div class="float-label cpp">C++ / Robotics</div>
+        <div class="float-label js">JS / TS</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="paths">
+    <div class="page-container">
+      <div class="section-heading">
+        <div><span class="eyebrow">CHOOSE YOUR DIRECTION</span><h2>先选目标，再学语言。</h2></div>
+        <p>共同基础只学一次。之后按你想进入的现场，选择 Python 或 C++ 的实践路线。</p>
+      </div>
+      <div class="goal-grid">
+        <a class="goal-card" href="/learn?goal=ai" data-goal="ai">
+          <div><div class="goal-icon" aria-hidden="true">⌁</div><h3>AI 工程路径</h3><p>先完成 JS/TS → Python 迁移基础，再进入数据、模型和 AI 服务工程。</p></div>
+          <span class="goal-arrow" aria-hidden="true">↗</span>
+        </a>
+        <a class="goal-card robotics" href="/learn?goal=robotics" data-goal="robotics">
+          <div><div class="goal-icon" aria-hidden="true">⊙</div><h3>机器人路径</h3><p>先完成 JS/TS → C++ 迁移基础，再进入消息、实时性和 ROS 2 工程。</p></div>
+          <span class="goal-arrow" aria-hidden="true">↗</span>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <section class="section method-section" id="method">
+    <div class="page-container">
+      <div class="section-heading">
+        <div><span class="eyebrow">HOW IT WORKS</span><h2>每节课只解决一个迁移难点。</h2></div>
+        <p>不用重新读一遍编程入门。先看你认识的表达，再理解新语言为什么这样设计。</p>
+      </div>
+      <div class="method-grid">
+        <article class="method-item"><span class="method-index">01 / TRANSLATE</span><h3>先从 JS/TS 出发</h3><p>把数组、对象、Promise、模块这些已有经验作为坐标系。</p></article>
+        <article class="method-item"><span class="method-index">02 / UNDERSTAND</span><h3>看懂关键差异</h3><p>只解释真正会影响工程结果的类型、内存、工具链和并发模型。</p></article>
+        <article class="method-item"><span class="method-index">03 / APPLY</span><h3>马上完成小练习</h3><p>每节课用一个小任务确认理解，再连接到 AI 或机器人项目。</p></article>
+      </div>
+    </div>
+  </section>
+</BaseLayout>

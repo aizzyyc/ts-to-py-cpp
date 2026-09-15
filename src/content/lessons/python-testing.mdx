@@ -1,0 +1,203 @@
+---
+id: python-testing
+slug: testing-and-debugging
+title: "测试、调试与可观察性"
+summary: "用 pytest 思维建立输入、输出和失败路径的可靠边界。"
+track: python
+order: 8
+durationMinutes: 10
+concepts: [testing, debugging, logging]
+prerequisites: [python-files]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+完成本节后，你应该能从 Vitest/Jest 迁移到 pytest 的测试发现和断言方式；能测试正常结果、异常类型和边界数值；能用 fixture 隔离临时文件；能用 fake 或 mock 隔离 HTTP 和模型依赖；能区分单元、集成、契约和端到端测试；能按可重复的排错路径定位数据或模型服务回归。
+
+## 从 JS/TS 迁移的心智模型
+
+从 JavaScript/TypeScript 的 Vitest 或 Jest 迁移时，pytest 测试通常就是一个名称以 `test_` 开头的函数，不需要 `describe` 包裹，也不需要把断言写成 matcher 链。`assert` 直接检查 Python 表达式，失败时 pytest 会展开表达式差异。测试不是把 happy path 跑一次，而是把输入、输出、异常和副作用固定成行为协议：缺字段、零值、坏 JSON、超时和模型响应缺字段都应该有明确结果。
+
+对 AI 数据管线，先测纯函数和小记录，再用少量集成测试连接文件或客户端；不要用一个巨大训练集测试所有事情。测试越小，失败时越容易知道是解析、清洗、特征转换还是服务边界发生了变化。
+
+<CompareCode
+  sourceLabel="Vitest"
+  sourceLanguage="typescript"
+  source={`it("rejects an empty event", () => {
+  expect(validate({})).toBe(false);
+});`}
+  targetLabel="pytest"
+  targetLanguage="python"
+  target={`def test_rejects_empty_event():
+    assert validate({}) is False`}
+/>
+
+### 断言结果和失败语义
+
+`assert result == expected` 适合纯函数；`assert result is None` 区分“没有结果”与空列表；`pytest.raises(ValueError, match="label")` 同时确认异常类型和可行动的消息。不要只断言“抛了任意异常”，否则代码从 `ValueError` 变成 `KeyError` 时，测试可能掩盖输入契约被破坏。浮点特征用 `pytest.approx` 处理计算精度，但容差必须小到不会掩盖模型性能回归。
+
+### 示例一：从正常值到边界值
+
+```python
+import pytest
+
+def normalize_score(value: object) -> float:
+    score = float(value)
+    if not 0 <= score <= 1:
+        raise ValueError("score must be between 0 and 1")
+    return score
+
+def test_normalize_score_accepts_zero():
+    assert normalize_score(0) == 0.0
+
+def test_normalize_score_is_close_for_decimal_input():
+    assert normalize_score("0.3") == pytest.approx(0.3)
+
+def test_normalize_score_reports_bad_range():
+    with pytest.raises(ValueError, match="between"):
+        normalize_score(1.1)
+```
+
+这三条测试分别锁定零值、字符串转换后的数值和范围错误。运行 `python -m pytest tests/test_scores.py -q` 时，成功输出会显示三条通过；如果第二条失败，先看实际值和容差，不要把容差无限放大。
+
+### fixture：让每个测试拥有自己的输入
+
+fixture 是 pytest 在测试前准备、并把对象传给测试函数的机制。内置的 `tmp_path` 为每个测试提供独立临时目录，适合验证文件、JSONL 和 UTF-8，不会污染仓库。自定义 fixture 可以准备共同的小数据，但不要返回一个全局可变 list 供多个测试反复修改。
+
+```python
+import pytest
+
+@pytest.fixture
+def event_rows():
+    return [
+        {"text": "  你好  ", "label": "ok"},
+        {"text": "", "label": "ok"},
+    ]
+
+def test_clean_strips_text(event_rows):
+    cleaned = [row for row in event_rows if row["text"].strip()]
+    assert cleaned == [{"text": "  你好  ", "label": "ok"}]
+
+def test_file_output_is_utf8(tmp_path):
+    output = tmp_path / "out.jsonl"
+    output.write_text('{"text":"你好"}' + chr(10), encoding="utf-8")
+    assert "你好" in output.read_text(encoding="utf-8")
+```
+
+`tmp_path` 测试的是文件边界，`event_rows` 测试的是内存清洗；两者职责不同。若 fixture 太大或偷偷连接网络，说明测试层级混在了一起。
+
+### mock 和 fake：隔离 HTTP 与模型依赖
+
+真实 HTTP 会受网络、服务状态和时间影响，不应成为普通单元测试的前置条件。fake 是一个手写的最小实现，适合表达稳定行为；mock 可以记录调用参数，适合确认客户端以正确的 timeout 和 payload 调用服务。不要只 mock 到让测试通过，却完全不检查响应 schema。
+
+```python
+from unittest.mock import Mock
+
+def classify(client, endpoint: str, features: list[float]) -> str:
+    response = client.post(endpoint, json={"features": features}, timeout=5)
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload.get("label"), str):
+        raise ValueError("model response needs a label")
+    return payload["label"]
+
+def test_classify_uses_timeout_and_returns_label():
+    response = Mock()
+    response.json.return_value = {"label": "cat"}
+    client = Mock()
+    client.post.return_value = response
+
+    assert classify(client, "/predict", [0.1, 0.9]) == "cat"
+    client.post.assert_called_once_with(
+        "/predict", json={"features": [0.1, 0.9]}, timeout=5
+    )
+```
+
+这里没有发出网络请求，但验证了模型服务的调用协议。再补一条 response 缺少 `label` 的测试，确认错误不会把异常 JSON 当成正常预测。
+
+### 测试层级：每层回答不同问题
+
+单元测试只关注一个纯函数或一个对象，反馈最快；集成测试把清洗器和真实临时文件、数据库或序列化器接起来；契约测试验证 HTTP 请求和响应 schema 与服务约定一致；端到端测试才启动真实应用、模型和代表性数据，数量应少且稳定。若一个单元测试需要启动模型服务，它已经不再是单元测试；若所有测试都 mock，真实 import、编码和网络边界又没有证据。
+
+### 示例二：测试文件清洗器的三层观察
+
+对 JSONL 清洗器，可以分别断言：纯函数给一条合法记录的结果，`tmp_path` 中的输出含中文且可解析，模拟的 HTTP 上传收到正确统计。不要在一个测试里同时断言十个字段和五个副作用；每个测试只锁定一个行为，失败名称本身就是排错线索。
+
+## 运行验证：先单测，再全量，再调试
+
+安装好 pytest 后，先运行 `python -m pytest tests/test_clean.py -q`，再运行 `python -m pytest -q`。单文件命令确认局部输入、输出和异常，全量命令确认 fixture、环境和模块导入没有互相污染。失败时加 `-vv` 查看测试名和参数，用 `-x` 在第一处失败停止，必要时用 `--pdb` 或在本地临时放置 `breakpoint()`。记录输入行数、输出行数、`kept/dropped`、异常类型和数据版本；不要在日志里打印完整 token、用户文本或 API key。
+
+## 常见错误与排错路径
+
+- pytest 找不到测试：文件命名使用 `test_*.py` 或 `*_test.py`，函数名以 `test_` 开头；先运行 `python -m pytest --collect-only -q` 看收集结果。
+- `ModuleNotFoundError`：用当前 venv 的 `python -m pytest`，打印 `sys.executable` 和模块 `__file__`，不要混用系统 pytest。
+- 单独通过、全量失败：检查全局可变状态、环境变量、工作目录、临时文件和 fixture 是否被测试修改后复用。
+- mock 让所有东西都通过：检查是否断言调用参数和 response schema；关键集成路径必须使用真实序列化或临时文件。
+- 浮点断言不稳定：用小范围 `pytest.approx`，先确认差异来自计算精度而不是模型输入变化。
+- `NaN != NaN`：用 `math.isnan` 或明确的缺失值策略，不要把所有 NaN 静默改成零。
+- 测试挂起：搜索是否真实调用 HTTP、无限重试或等待队列；给客户端 timeout，并在单元测试用 fake/mock。
+- 调试泄露敏感数据：只打印字段名、长度、hash、job id 和脱敏样本，不把 token、密钥或完整用户文本写入日志。
+
+## 练习：为清洗器补齐边界测试
+
+为上一节的 `prepare_jsonl` 写至少四条 pytest 测试：合法中文行被保留，缺少 `text` 被丢弃，坏 JSON 增加 `dropped`，输出可以用 UTF-8 读回。再加一条测试 source 与 target 相同路径时抛出可定位的 `ValueError`。每个测试只验证一个行为，并分别运行单文件和全量测试。
+
+<KeyIdea title="测试是迁移时的行为协议">
+  <p>当你把 JS/TS 逻辑翻成 Python，测试先说明旧行为和新边界，调试日志再说明某次运行走了哪条路径。二者结合才能避免“能跑但数据变了”，尤其要把模型服务的响应契约和数据统计固定下来。</p>
+</KeyIdea>
+
+### 提示
+
+使用 `tmp_path` 构造输入和输出；每个 `source.write_text` 都指定 `encoding="utf-8"`。断言结果和 `kept/dropped` 统计，不要断言内部变量名。坏 JSON 的测试应检查统计，中文测试应读取真实输出文件，而不是只检查函数返回值。
+
+### 完整答案
+
+<Exercise
+  title="为清洗器补边界测试"
+  prompt="为 prepare_jsonl 补充合法中文行、缺少 text、坏 JSON 和相同路径的 pytest 测试；每个测试只验证一个行为。"
+  hint="使用 tmp_path 隔离文件；断言输出文本、kept/dropped 统计和 ValueError 消息。"
+  solution={`import pytest
+
+def test_prepare_keeps_utf8(tmp_path):
+    source = tmp_path / "in.jsonl"
+    target = tmp_path / "out.jsonl"
+    source.write_text('{"text":"你好","label":"ok"}' + chr(10), encoding="utf-8")
+    result = prepare_jsonl(source, target, {"ok"})
+    assert result == {"kept": 1, "dropped": 0}
+    assert "你好" in target.read_text(encoding="utf-8")
+
+def test_prepare_drops_missing_text(tmp_path):
+    source = tmp_path / "in.jsonl"
+    target = tmp_path / "out.jsonl"
+    source.write_text('{"label":"ok"}' + chr(10), encoding="utf-8")
+    assert prepare_jsonl(source, target, {"ok"})["dropped"] == 1
+
+def test_prepare_counts_bad_json(tmp_path):
+    source = tmp_path / "in.jsonl"
+    target = tmp_path / "out.jsonl"
+    source.write_text("not-json" + chr(10), encoding="utf-8")
+    assert prepare_jsonl(source, target, {"ok"})["dropped"] == 1
+
+def test_prepare_rejects_same_path(tmp_path):
+    source = tmp_path / "same.jsonl"
+    source.write_text("{}" + chr(10), encoding="utf-8")
+    with pytest.raises(ValueError, match="different"):
+        prepare_jsonl(source, source, {"ok"})`}
+/>
+
+<SolutionReveal>
+  <p>先运行单文件测试确认四条行为，再运行全量测试确认导入、fixture 和环境没有冲突。若全量测试才失败，优先检查共享状态、工作目录和环境依赖；不要把测试顺序固定成“看起来能过”的替代方案。</p>
+</SolutionReveal>
+
+## 与后续 AI 数据工程的连接
+
+pytest 可以固定文本清洗、特征形状、模型响应和数据统计；fixture 隔离文件与配置，mock/fake 让服务失败路径可重复，集成测试验证真实序列化和编码，少量端到端测试验证整个模型服务链。测试输出是迁移的证据：它告诉你 Python 版本是否保留了原有行为，也告诉你哪些边界是有意改变的。
+
+## 小结
+
+可靠测试从具体输入开始：直接断言结果，明确异常语义，用 fixture 隔离资源，用 mock 控制外部依赖，按测试层级安排成本，按“复现—缩小—观察—修复—全量验证”调试。这样 Python 数据管线和模型服务才不会停留在“本地能跑”。

@@ -1,0 +1,134 @@
+---
+id: cpp-realtime
+slug: timing-realtime-and-determinism
+title: "时间、实时性与确定性"
+summary: "理解周期、抖动、截止时间和动态分配对机器人控制循环的影响。"
+track: cpp
+order: 22
+durationMinutes: 18
+concepts: [realtime, timing, determinism]
+prerequisites: [cpp-performance]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 时间、实时性与确定性
+
+Web 服务常看平均响应时间，机器人控制更关心每一次周期是否在截止时间前完成。动态分配、mutex 等待、日志、系统调用和不可预测的网络都会制造抖动。实时性不是把 `setInterval` 翻译成 `sleep`，而是定义周期、截止时间、允许的最大延迟、过期数据处理和安全降级。
+
+### 周期、截止时间和抖动要分开
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`setInterval(() => {
+  updateControl();
+}, 10);`}
+  targetLabel="C++"
+  targetLanguage="cpp"
+  target={`using Clock = std::chrono::steady_clock;
+auto next = Clock::now();
+while (running) {
+  next += 10ms;
+  update_control();
+  std::this_thread::sleep_until(next);
+}`}
+/>
+
+周期是理想启动间隔，执行耗时是从开始到结束，截止时间是允许的完成时刻，抖动是实际时间相对计划时间的波动。若每次都从“当前时间”再加 10ms，处理超时会让循环漂移；按绝对 `next` 调度可以暴露漏周期。`steady_clock` 不受系统时间校准跳变影响，适合测时长。
+
+### 一个可观测的控制循环
+
+```cpp
+#include <chrono>
+#include <thread>
+
+void control_loop(std::stop_token stop) {
+  using Clock = std::chrono::steady_clock;
+  constexpr auto period = std::chrono::milliseconds{10};
+  auto deadline = Clock::now() + period;
+  while (!stop.stop_requested()) {
+    const auto started = Clock::now();
+    update_control();
+    const auto finished = Clock::now();
+    if (finished > deadline) record_missed_deadline(finished - deadline);
+    std::this_thread::sleep_until(deadline);
+    deadline += period;
+    (void)started;
+  }
+}
+```
+
+示例需要补上工程自己的统计实现；真正实时线程还要配置调度优先级、内存锁定和 CPU 隔离，不能仅依赖循环代码。控制路径预分配消息、避免无限阻塞，数据过期时进入明确安全状态，例如停止速度命令，而不是继续使用旧目标。
+
+### 确定性来自资源纪律
+
+平均耗时低不代表最坏耗时低。为周期建立内存预算，避免在回调内第一次触发 allocator、动态加载或日志格式化；把慢操作移到非实时线程，通过有界队列交接。锁可以造成优先级反转，网络可以产生不可控重传，因此实时线程应尽量拥有局部状态和无阻塞输入。
+
+### 常见编译和运行时排错
+
+使用 `system_clock` 测间隔会遇到时间跳变；使用 `sleep_for` 会积累漂移；把 `std::cout` 放进高频循环会制造 I/O 抖动。p50 正常但 p99 很差时，查看调度、分配、锁和 page fault。Missed deadline 不一定是算法慢，也可能是线程没有被调度；记录开始/完成时间、CPU、队列深度和输入年龄再判断。
+
+### 学习目标
+
+完成本节后，你能区分周期、执行时长、deadline 和 jitter；使用 `steady_clock` 的绝对时间点调度；统计 missed deadline、输入年龄和 p99；解释分配、锁、日志、网络和 page fault 对确定性的影响；为超时输入定义安全输出。
+
+### 输入年龄与安全命令
+
+```cpp
+struct Command { std::uint64_t stamp_ns{}; double velocity{}; };
+
+Command validate(Command command, std::uint64_t now_ns) {
+  constexpr std::uint64_t max_age_ns = 50'000'000;
+  if (now_ns - command.stamp_ns > max_age_ns) return {now_ns, 0.0};
+  return command;
+}
+```
+
+用固定的 10ms、50ms、51ms 输入年龄测试边界。`0.0` 只是示例安全动作，真实底盘可能要求减速、急停或保持姿态；动作必须由机器人安全设计定义，不能从教程示例直接照搬。
+
+### 绝对 deadline 的三次循环
+
+```cpp
+using Clock = std::chrono::steady_clock;
+const auto period = std::chrono::milliseconds{10};
+auto deadline = Clock::now() + period;
+for (int cycle = 0; cycle < 3; ++cycle) {
+  update_control();
+  if (Clock::now() > deadline) record_miss();
+  std::this_thread::sleep_until(deadline);
+  deadline += period;
+}
+```
+
+编译用 `g++ -std=c++20 -pthread realtime.cpp -o realtime`。按绝对 deadline 递增可以暴露漏周期；每次从 now 加 period 会在一次慢执行后永久漂移。验证时故意让 `update_control` 耗时 15ms，观察 miss 计数而不是延长 deadline。
+
+### JS/TS 迁移的实时反例
+
+`setInterval`、`setTimeout` 和 `sleep_for` 都没有硬实时保证。不要在控制循环中做无界队列等待、动态分配、网络重试或格式化日志；把这些操作移到非实时线程，经有界消息交接。控制线程要有预算、过期数据规则和最大等待时间。
+
+### 机器人实时性验收
+
+每周期记录 `cycle_index`、started、finished、planned deadline、input_age、queue_depth 和 allocation count，统计 miss_count、max_lateness、p50/p99。p50 正常但 p99 很差时，分别排查调度、锁、分配和 page fault；没有这些字段，无法知道是算法慢还是线程没被调度。
+
+<KeyIdea title="实时性是时间和资源的联合契约">
+  <p>用 steady_clock 按绝对 deadline 调度，分别统计执行时长、迟到量和输入年龄；用预分配、有限等待和安全降级控制最坏情况。</p>
+</KeyIdea>
+
+## 迁移练习
+
+设计 10ms 控制循环的测量表：每次记录开始、完成、计划 deadline、输入时间戳、队列深度和分配次数，统计 miss count、最大迟到、p50/p99。模拟处理突然耗时 15ms，说明下一周期是追赶、跳过还是进入安全模式。
+
+<Exercise
+  title="写出你的实时性验收条件"
+  prompt="为控制循环设定周期、截止时间和最大允许输入年龄；实现 missed deadline 与最大抖动统计，并说明超时后的安全动作。"
+  hint="使用 steady_clock 和绝对 deadline；不要用 sleep 让超时消失，先记录它。"
+  solution={`用 steady_clock 计算 finished - deadline，增加 miss_count 并更新最大迟到；同时计算 now - message.stamp 判断数据年龄。若超过阈值，发布零速度或安全控制输出并记录原因；是否跳过一个周期要由控制器的稳定性验证决定。`}
+/>
+
+<SolutionReveal>
+  <p>当时间预算、资源预算和超时动作都能被测量，实时性才从口号变成工程契约。下一节会把这种契约延伸到网络、IPC 和进程故障边界。</p>
+</SolutionReveal>

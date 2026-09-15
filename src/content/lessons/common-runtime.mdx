@@ -1,0 +1,71 @@
+---
+id: common-runtime
+slug: runtime-and-toolchain
+title: "运行时与工具链：从 npm 到编译器"
+summary: "理解解释执行、编译、包管理和项目入口在三种语言中的差异。"
+track: common
+order: 1
+durationMinutes: 8
+concepts: [runtime, toolchain, package manager]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 先记住这张地图
+
+你不需要重新学习“程序是什么”，但必须重新画出代码到运行状态的路径。JS/TS 通常由 Node.js 读取模块并在运行时执行，TypeScript 还要先经过类型检查或转译；Python 由解释器加载模块，常用虚拟环境锁定依赖；C++ 则把源文件编译成目标文件，再链接成可执行文件。三者都能启动服务、训练数据管线或机器人节点，但错误出现的时间不同：拼错的导入可能在 Node/Python 启动时暴露，C++ 的声明错误通常在编译阶段暴露，ABI 或动态库不匹配又可能推迟到启动阶段。
+
+迁移时先问三个问题：入口是谁调用的，依赖从哪里来，修改后哪一步必须重新执行。不要把“能在我的终端跑起来”误认为工具链已经可复现。AI 项目要记录 Python 版本、CUDA/CPU 约束和模型包版本；机器人项目要记录编译器、系统库和目标架构。一个清晰的启动命令，本质上是团队共享的运行契约。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="json"
+  source={`{ "scripts": { "start": "node src/index.js" } }`}
+  targetLabel="C++"
+  targetLanguage="bash"
+  target={`cmake -S . -B build
+cmake --build build
+./build/app`}
+/>
+
+### 从解释到编译：心智模型的差别
+
+`npm run` 只是查表后启动一个进程，不会替你保证 Node 版本；`python -m app.cli` 会按模块路径解析包，当前工作目录和虚拟环境会影响结果；`cmake --build` 可能只重编译受影响的目标，并在链接时合并库。把这些步骤拆开看，遇到问题就能判断是源码、依赖、构建缓存还是运行环境，而不是盲目重装。
+
+```bash
+# 用最小命令验证“入口—依赖—运行时”
+node --version
+node src/index.js --input sample.json
+python -m app.cli --input sample.json
+cmake -S . -B build && cmake --build build && ./build/app sample.json
+```
+
+### 工程上要固定什么
+
+提交 lockfile 或依赖约束，给 Python 使用明确的虚拟环境和 requirements，给 C++ 写清 CMake target 和编译标准。不要把生成的 `dist`、`build` 当成唯一真相；真正可复现的是源码、配置、依赖版本和构建命令的组合。对于跨平台项目，先在干净环境运行一次启动命令，再把缺失步骤写进 README 或 CI。
+
+### 常见错误与排错顺序
+
+看到“模块找不到”，先确认执行目录和入口，再检查依赖是否安装到了当前环境；看到 C++ 的链接错误，区分“找不到声明”与“找不到实现”，前者看头文件，后者看 target 链接关系。若本地能跑、CI 失败，比较运行时版本和环境变量，不要先修改业务逻辑。把完整命令、版本输出和第一处错误保存下来，通常比最后一行堆栈更有价值。
+
+<KeyIdea title="不要把三种入口想成同一件事">
+  <p><strong>npm run</strong> 是脚本入口，Python 的虚拟环境是依赖隔离，CMake 是构建系统。它们可以协作，但职责并不相同；迁移时要固定每条边界，而不是寻找一个万能命令。</p>
+</KeyIdea>
+
+## 迁移练习
+
+打开一个你熟悉的 Node.js 项目，写出从命令到程序运行经过的步骤，再设计一个 Python 或 C++ 版本。请记录运行时版本、依赖安装位置、入口参数，以及修改一个源文件后实际执行了哪些重新构建步骤。最后故意在错误的目录运行命令，观察并记录错误信息。
+
+<Exercise
+  title="给一个新仓库画出启动路径"
+  prompt="打开一个你熟悉的 Node.js 项目，用一句话写出它从命令到程序运行经过的步骤。再想想：如果它变成 C++，哪一步会新增？"
+  hint="从 package.json 的 scripts 和入口文件开始，再补上运行时版本与依赖隔离；不必研究所有依赖。"
+  solution={`命令 -> package script -> node -> 入口模块 -> 依赖模块。Python 是命令 -> 虚拟环境解释器 -> 模块入口；C++ 通常新增源文件 -> 编译 -> 链接 -> 可执行文件 -> 运行。`}
+/>
+
+<SolutionReveal>
+  <p>语言迁移的第一步不是背语法，而是把“代码如何到达运行状态”说清楚。遇到问题时沿入口、依赖、构建、运行时四层定位，才不会用重装依赖掩盖真正的环境差异。</p>
+</SolutionReveal>

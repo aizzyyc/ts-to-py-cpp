@@ -1,0 +1,153 @@
+---
+id: cpp-interfaces
+slug: classes-interfaces-and-errors
+title: "类、接口与错误处理"
+summary: "比较 TypeScript interface、C++ class 和显式错误返回的边界。"
+track: cpp
+order: 10
+durationMinutes: 12
+concepts: [classes, interfaces, errors]
+prerequisites: [cpp-move]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+完成本节后，你能把数据和不变量封装进 class，区分 composition 与 inheritance；会用纯虚函数设计可替换的传感器接口，正确声明 virtual destructor；能理解 TypeScript interface 与 C++ runtime polymorphism 的差异，并为硬件驱动写一个可测试的 mock 边界。
+
+## TS interface 和 C++ class 的不同
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'interface Sensor { read(): Sample }'} targetLabel="C++" targetLanguage="cpp" target={'struct Sensor { virtual Sample read() = 0; };'} />
+
+TypeScript interface 主要在编译期描述对象形状，运行时通常不存在；C++ class 可以包含状态、构造析构、访问控制和虚函数表，运行时对象确实有布局。C++ 接口如果通过基类指针删除派生对象，基类析构函数必须是 virtual，否则行为未定义。
+
+反例是把 TS 的 structural typing 原样翻译成一个只列方法的 C++ class。C++ 还要决定谁拥有对象、接口是否可复制、函数是否抛异常、线程是否安全和返回值如何表达。优先用组合把设备、解析器和策略拼起来，不要为了复用几行代码建立深层继承树。
+
+## 示例一：class 封装不变量
+
+~~~cpp
+#include <stdexcept>
+
+class Range {
+public:
+  explicit Range(double meters) : meters_{meters} {
+    if (meters < 0.0) throw std::out_of_range("negative range");
+  }
+  double meters() const { return meters_; }
+  bool within(double minimum, double maximum) const {
+    return meters_ >= minimum && meters_ <= maximum;
+  }
+private:
+  double meters_;
+};
+~~~
+
+构造函数是建立不变量的入口，private 字段避免调用者直接写入负值。const 成员函数承诺不修改对象。编译、运行时用 0.8、0、-1 三组输入验证：前两个构造成功，负值进入明确错误路径。这个小类比一个裸 double 更能保护后续控制器。
+
+## 示例二：纯虚接口与 mock
+
+~~~cpp
+#include <optional>
+
+struct SensorSample {
+  double range_m;
+  bool valid;
+};
+
+class RangeSensor {
+public:
+  virtual ~RangeSensor() = default;
+  virtual std::optional<SensorSample> read() = 0;
+};
+
+class FakeSensor final : public RangeSensor {
+public:
+  explicit FakeSensor(double value) : value_{value} {}
+  std::optional<SensorSample> read() override {
+    return SensorSample{value_, value_ >= 0.0};
+  }
+private:
+  double value_;
+};
+~~~
+
+RangeSensor 不能直接实例化，FakeSensor 可以在测试里提供确定输入。override 让编译器检查方法是否真的重写；final 表示 FakeSensor 不再作为基类扩展。通过 RangeSensor& 调用时不需要知道真实设备类型，这就是运行时多态。验证时用 fake 测试边界，不需要接上真实雷达。
+
+## 示例三：组合一个消息处理器
+
+~~~cpp
+class RangeProcessor {
+public:
+  explicit RangeProcessor(RangeSensor& sensor) : sensor_{sensor} {}
+
+  int process_once() {
+    const auto sample = sensor_.read();
+    if (!sample || !sample->valid) return 1;
+    last_range_m_ = sample->range_m;
+    return 0;
+  }
+
+  std::optional<double> last_range() const { return last_range_m_; }
+
+private:
+  RangeSensor& sensor_;
+  std::optional<double> last_range_m_;
+};
+~~~
+
+RangeProcessor 借用 sensor，不拥有它；调用者必须保证 sensor 活得更久。若处理器需要跨线程或独立管理设备，应改为 unique_ptr 或其他明确的 owner。process_once 用返回码表达一次消息是否被接受，last_range 用 optional 表达还没有成功样本。编译后用 FakeSensor 分别验证成功和坏样本。
+
+## 接口边界的所有权表
+
+引用通常表示同步借用，unique_ptr 表示独占拥有，shared_ptr 表示共享生命周期，裸指针表示可为空的观察者。接口文档还要说明 read 是否阻塞、是否线程安全、失败后设备状态是否改变。一个函数签名无法表达所有时序约束，所以需要命名、注释和测试共同组成契约。
+
+## 多态与对象切片
+
+~~~cpp
+class Base {
+public:
+  virtual ~Base() = default;
+  virtual const char* name() const = 0;
+};
+
+class Lidar final : public Base {
+public:
+  const char* name() const override { return "lidar"; }
+};
+~~~
+
+把 Lidar 按 Base 值传递会发生 object slicing，只保留 Base 部分；多态对象通常通过引用或指针使用。不要返回指向局部派生对象的引用。若没有运行时替换需求，模板或直接组合可能更简单、更快，也更容易让编译器内联。
+
+## 编译、运行与排错
+
+编译时开启 -Wall -Wextra -Wpedantic -Werror，重点检查 missing override、未初始化字段和窄转换。若链接失败，确认所有 virtual 函数都有 definition；若删除派生对象崩溃，检查基类析构是否 virtual；若调用后 mock 失效，检查引用或指针指向的对象是否已经离开作用域。用 AddressSanitizer 验证接口对象的生命周期，用小 fake 复现错误而不是先连接硬件。
+
+## 机器人连接：硬件抽象和可测试性
+
+真实机器人驱动会受设备、网络、时序和权限影响。让控制器依赖 RangeSensor 接口，测试时用 FakeSensor 或 ReplaySensor 注入固定消息，就能先验证滤波和状态机。生产实现可以包装串口、ROS 2 topic 或 SDK；业务层不应该到处出现设备厂商类名。接口越小，替换和诊断越容易。
+
+<KeyIdea title="接口的价值是隔离变化，不是增加继承层级">
+  <p>把硬件读取与消息处理分开，用最小接口和明确所有权连接它们。需要运行时替换时用虚函数，否则优先组合或模板，避免为抽象而抽象。</p>
+</KeyIdea>
+
+## 动手练习
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'function process(sensor: Sensor) {}'} targetLabel="C++" targetLanguage="cpp" target={'void process(RangeSensor& sensor) {}'} />
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'const fake: Sensor = makeFake();'} targetLabel="C++" targetLanguage="cpp" target={'FakeSensor fake{1.2};'} />
+
+定义 TemperatureSensor 接口和 FakeTemperatureSensor，实现一个 AlarmController：温度超过阈值返回 warning，读取失败返回 error。用三个 fake 输入覆盖正常、超限和无数据，并检查基类指针销毁派生对象不会泄漏。
+
+<Exercise title="为控制逻辑注入一个假传感器" prompt="写出接口、fake 和处理器的三层关系，标注每个对象的 owner；说明为什么处理器不能保存一个局部 fake 的引用。" hint="基类析构设为 virtual；同步借用用引用，跨作用域拥有用 unique_ptr；process 先检查 optional 再读取值。" solution="FakeSensor 由测试函数拥有并在处理器之前销毁；处理器只借用 RangeSensor&；若处理器要独立拥有实现，则构造函数接收 unique_ptr<RangeSensor>。" />
+
+## 小结与下一步
+
+<SolutionReveal>
+  <p>打开答案后，请把示例改成自己的传感器数据，再用编译器、运行输出和边界输入验证，而不是只对照文字。</p>
+</SolutionReveal>
+
+class 保护状态，接口隔离硬件变化，组合让消息处理器保持可测试。下一节会把这类接口中的重复算法抽成模板，比较运行时多态与编译期泛型在性能和错误提示上的取舍。

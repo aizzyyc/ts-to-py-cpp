@@ -1,0 +1,200 @@
+---
+id: cpp-stl
+slug: stl-containers-and-algorithms
+title: "STL 容器与算法"
+summary: "把 Array、Map 和高阶函数经验迁移到 vector、unordered_map 和算法。"
+track: cpp
+order: 6
+durationMinutes: 12
+concepts: [stl, vector, algorithms]
+prerequisites: [cpp-values]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+本节结束时，你能根据访问方式选择 vector、array、deque、map 或 unordered_map；理解 size、capacity、迭代器和元素有效性的关系；会用 STL 算法处理传感器消息，并通过编译、运行和边界测试验证容器代码，而不是把所有数据都装进一个“万能数组”。
+
+## 从 JS Array 与 Map 到 STL
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'ranges.filter((x) => x > 0)'} targetLabel="C++" targetLanguage="cpp" target={'std::copy_if(ranges.begin(), ranges.end(), out, predicate)'} />
+
+JS Array 是动态对象，既能按索引访问也能混合存放值；C++ vector 通常要求同一元素类型，连续存储使遍历和缓存访问高效。JS Map 的键和值是动态的，std::map 有序且查找是对数复杂度，unordered_map 平均常数时间但需要哈希和正确的键相等规则。选择容器就是选择内存布局、复杂度和失效规则。
+
+反例是只因为 vector 最熟就用它做所有事情：按键查找会退化成线性扫描，机器人消息缓存可能不适合频繁头尾操作。另一个反例是用 unordered_map 追求“快”却忽略确定性排序；日志、调试和协议输出有时更需要稳定顺序。
+
+## 示例一：vector 保存采样窗口
+
+~~~cpp
+#include <iostream>
+#include <vector>
+
+int main() {
+  std::vector<double> ranges;
+  ranges.reserve(4);
+  ranges.push_back(0.8);
+  ranges.push_back(1.2);
+  ranges.push_back(0.6);
+
+  std::cout << ranges.size() << " " << ranges.capacity() << "\n";
+  for (const double value : ranges) std::cout << value << " ";
+}
+~~~
+
+输出第一行至少是 3 4，第二行是 0.8 1.2 0.6。reserve 预留容量但不改变 size；resize 才会创建元素。高频采样时提前 reserve 可以减少扩容和搬移，但不能把 reserve 当成“已经有可写的元素”。用 ranges[3] 写入仍然越界，必须 push_back 或 resize。
+
+## 示例二：map 与 unordered_map 计数
+
+~~~cpp
+#include <iostream>
+#include <map>
+#include <unordered_map>
+#include <string>
+
+int main() {
+  const std::vector<std::string> states{"ready", "fault", "ready"};
+  std::map<std::string, int> ordered;
+  std::unordered_map<std::string, int> fast;
+  for (const auto& state : states) {
+    ++ordered[state];
+    ++fast[state];
+  }
+  for (const auto& [state, count] : ordered) {
+    std::cout << state << ":" << count << "\n";
+  }
+}
+~~~
+
+map 输出按 key 排序，便于稳定日志；unordered_map 不承诺遍历顺序。运行时检查 ready:2 和 fault:1。需要实时性能时测量真实数据，不要从平均复杂度推断每个周期都一定更快；哈希冲突、扩容和分配仍会影响延迟。
+
+## 示例三：string、array 和 span
+
+~~~cpp
+#include <array>
+#include <iostream>
+#include <span>
+#include <string>
+
+double first_or_zero(std::span<const double> values) {
+  return values.empty() ? 0.0 : values.front();
+}
+
+int main() {
+  const std::array<double, 3> calibration{1.0, 1.1, 0.9};
+  const std::string frame_id{"front_lidar"};
+  std::cout << frame_id << " " << first_or_zero(calibration) << "\n";
+}
+~~~
+
+std::array 的长度是类型的一部分，适合固定数量校准值；string 表示文本，不是任意字节缓冲；span 可以让算法接受不同的连续容器而不拥有数据。验证时给 first_or_zero 一个空 vector，预期得到 0，不应访问 front。
+
+## size、capacity 与迭代器
+
+vector 的 size 是当前元素数量，capacity 是无需再次分配时可容纳的数量。插入导致扩容后，旧的 iterator、pointer 和 reference 可能失效；保存一个元素引用再 push_back 是常见 bug。调试时不要只打印地址，因为地址变化本身不是错误，真正的错误是继续使用失效别名。若需要稳定地址，重新设计存储或使用适合的容器，并用文档确认其保证。
+
+## 算法入口和复杂度
+
+STL 容器提供数据，algorithm 提供通用操作。find、count_if、sort 和 accumulate 能表达意图，也让复杂度更容易审查：线性扫描通常是 O(n)，排序是 O(n log n)，map 查找是 O(log n)，unordered_map 平均是 O(1)。不要为了少写几行代码，把一个每秒处理百万点的循环换成未知分配的表达式；先看容器和复杂度，再做 profiling。
+
+## 编译、运行与排错
+
+使用 c++ -std=c++20 -Wall -Wextra -Wpedantic -Wconversion 编译。若提示 vector 未声明，补上 vector header；若 output 顺序不稳定，确认是否使用 unordered_map；若程序在 push_back 后崩溃，查是否保存了扩容前的引用或 iterator；若统计结果少一个，检查 end 是半开区间。AddressSanitizer 能帮助定位越界和 use-after-reallocation，但仍需要人工检查容器选择。
+
+## 机器人连接：消息缓冲的容器选择
+
+传感器帧通常是连续数值，vector 便于批量计算；固定大小的 IMU 校准参数适合 array；按设备 ID 查找状态可以用 unordered_map；需要确定顺序的诊断输出可以用 map。对于实时节点，提前 reserve、避免循环内分配、记录消息时间戳和限制队列长度，往往比盲目使用某种“最快”容器更重要。
+
+<KeyIdea title="容器选择同时决定数据结构和失败方式">
+  <p>先问数据是否连续、是否固定大小、是否按键查找、是否需要排序，再选择 STL 容器。size、capacity 和迭代器有效性是性能与正确性的共同基础。</p>
+</KeyIdea>
+
+## 动手练习
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'const latest = queue.shift();'} targetLabel="C++" targetLanguage="cpp" target={'const auto latest = queue.front(); queue.pop_front();'} />
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'counts.set(state, (counts.get(state) ?? 0) + 1);'} targetLabel="C++" targetLanguage="cpp" target={'++counts[state];'} />
+
+实现一个消息统计器：输入多个 SensorState 字符串，输出按字典序的计数；同时保存一段距离采样窗口，限制最大长度为 5，超过后删除最旧样本。验证空窗口、重复状态和恰好达到容量上限的情况。
+
+<Exercise title="为传感器消息选择容器" prompt="说明为什么状态计数用 map、unordered_map 或 vector 各有不同取舍，并实现一个最多保存 5 个距离的 vector 窗口。" hint="窗口超过 5 时 erase(begin())；如果追求大量头部删除，再研究 deque，而不是先隐藏复杂度。" solution="map 适合稳定排序日志，unordered_map 适合按键查询，vector 适合小规模线性数据；窗口 push_back 后若 size 大于 5 就 erase(begin())，并为 size 为 0 做读取保护。" />
+
+## 延伸实践与验证
+
+
+## vector 的连续存储与扩容成本
+
+vector 的优势不是“像 JS Array”，而是元素连续，遍历时缓存局部性好，能直接交给需要连续范围的算法。它的代价是扩容时可能分配新内存并搬移元素，插入开头或中间还要移动后续元素。reserve 应根据可估计的帧大小设置，不能为了安全无限预留，因为这会增加常驻内存。
+
+size 表示有效元素，capacity 表示当前分配能容纳多少元素。resize 会创建或销毁元素，reserve 不会改变可访问元素数量。把这两个操作混淆，是初学者最常见的“写入越界”来源之一。调试时打印 size 和 capacity，确认每一次写入都来自 push_back、emplace_back 或已经存在的位置。
+
+## 示例四：有上限的采样窗口
+
+~~~cpp
+#include <iostream>
+#include <vector>
+
+class RangeWindow {
+public:
+  explicit RangeWindow(std::size_t limit) : limit_{limit} {}
+
+  void push(double value) {
+    if (limit_ == 0) return;
+    values_.push_back(value);
+    if (values_.size() > limit_) values_.erase(values_.begin());
+  }
+
+  double latest_or(double fallback) const {
+    return values_.empty() ? fallback : values_.back();
+  }
+
+  std::size_t size() const { return values_.size(); }
+
+private:
+  std::size_t limit_;
+  std::vector<double> values_;
+};
+
+int main() {
+  RangeWindow window{3};
+  window.push(0.8);
+  window.push(1.2);
+  window.push(0.6);
+  window.push(1.4);
+  std::cout << window.size() << " " << window.latest_or(0.0) << "\n";
+}
+~~~
+
+输出是 3 和 1.4，最旧的 0.8 被移除。这个简单实现每次头部 erase 都要移动元素，窗口很大或频率很高时可以比较 deque、环形缓冲和预分配 vector。先用测试确认窗口语义，再以 profiling 结果决定替换容器。
+
+## 容器选择的决策顺序
+
+先问是否需要连续内存；若需要，优先 vector 或 array。再问是否固定大小；固定数量的校准值适合 array。若经常在两端入队出队，deque 可能更直接；若按 key 查询状态，map 提供排序和稳定迭代，unordered_map 提供平均常数查找但遍历顺序不稳定。若只需要少量元素，vector 线性扫描可能更简单、更快。
+
+还要问是否允许分配、是否需要确定性和是否跨线程共享。实时控制循环往往需要限制队列长度，避免异常输入让内存无限增长。多线程容器不是自动安全的，仍需要 mutex、单线程 owner 或无锁结构的明确协议。
+
+## 调试和性能验证
+
+对容器代码至少测试空容器、一个元素、达到容量、超过容量、重复 key 和大量数据。若输出顺序变化，确认是否使用 unordered_map；若引用在插入后失效，检查是否发生 vector 扩容；若延迟有尖峰，记录分配次数、capacity 变化和 erase 成本。不要只用一组小样本判断实时性能。
+
+编译时开启 warning 和 sanitizer，运行时给窗口加入序号与时间戳。这样可以区分“容器删错了元素”“消息本身乱序”和“日志打印顺序不稳定”。性能优化完成后仍要复跑功能验证，因为换容器常常也会改变边界语义。
+
+## 机器人连接：消息队列必须有容量策略
+
+激光、相机和 IMU 的消息到达速度可能不同。队列需要明确保留最新消息、保留完整历史还是丢弃过期消息；这个决定会影响控制延迟和内存。传感器诊断可以用 map 统计设备状态，实时数据用 vector 或固定窗口，日志输出再复制成稳定排序的结果。容器只是实现，消息策略才是系统行为。
+
+<KeyIdea title="先写数据策略，再选 STL 容器">
+  <p>连续性、查找方式、顺序、容量和线程模型共同决定容器选择。把 size、capacity、失效规则和复杂度写清楚，才能把性能问题变成可测量的工程问题。</p>
+</KeyIdea>
+
+
+<SolutionReveal>
+  <p>打开答案后，请把示例改成自己的传感器数据，再用编译器、运行输出和边界输入验证，而不是只对照文字。</p>
+</SolutionReveal>
+
+## 小结与下一步
+
+  STL 把容器、迭代器和算法组合成了可复用的数据处理语言。下一节会把函数对象和 lambda 加进来，让过滤、排序和变换逻辑既简洁又能解释其复杂度与捕获的生命周期。

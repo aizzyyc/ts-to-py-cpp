@@ -1,0 +1,232 @@
+---
+id: python-scikit
+slug: baselines-metrics-and-scikit-learn
+title: "基线模型、指标与 scikit-learn"
+summary: "先建立可解释的 baseline，再选择模型和指标，而不是一开始就追求复杂网络。"
+track: python
+order: 21
+durationMinutes: 18
+concepts: [baseline, metrics, scikit-learn]
+prerequisites: [python-visualization]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+本节完成后，你能用 scikit-learn 建立一条可解释的 AI 分类基线，并回答“这个模型真的比简单规则好吗”。你将会：
+
+- 选择与任务风险相匹配的 baseline、指标和决策阈值。
+- 用 Pipeline 把预处理和模型绑定，避免在全量数据上拟合造成泄漏。
+- 用交叉验证测量波动，区分训练、验证和最终测试结果。
+- 从混淆矩阵、precision、recall、F1 和 PR-AUC 找到模型下一步该改什么。
+
+## 从 JS/TS 迁移的心智模型
+
+JavaScript/TypeScript 中调用模型 API 往往只有输入和输出：await model.predict(features)。机器学习实验还需要一个可比较的过程：固定数据切分，拟合预处理，训练 baseline，输出预测，再按业务代价计算指标。scikit-learn 的 estimator 统一了 fit、predict 和 score，但统一接口不会自动保证数据公平；Pipeline 和评估协议仍要由工程师设计。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const prediction = await model.predict(features);
+const accuracy = score(labels, prediction);
+console.log({ accuracy });`}
+  targetLabel="Python / scikit-learn"
+  targetLanguage="python"
+  target={`pipeline.fit(x_train, y_train)
+prediction = pipeline.predict(x_test)
+metrics = classification_report(y_test, prediction, output_dict=True)`}
+/>
+
+<KeyIdea title="baseline 是参照物，不是临时玩具">
+  <p>一个多数类、规则或逻辑回归基线能告诉你数据是否有信号、指标是否受类别比例影响，以及复杂模型是否值得增加成本。</p>
+</KeyIdea>
+
+## 先定义任务和 baseline
+
+以传感器唤醒分类为例，样本包含温度、能量、持续时间等特征，标签是 wake 或 noise。先做三类比较：
+
+1. 多数类预测：不看特征，揭示 accuracy 的下限。
+2. 业务规则：例如能量超过阈值，帮助发现标签或单位问题。
+3. 线性模型：经过标准化后学习可解释的边界，作为可重复的机器学习基线。
+
+baseline 要和未来模型使用相同的切分和输入字段。如果神经网络使用了未来窗口，baseline 却只用当前值，比较就不公平；如果 baseline 的标准化先看了测试集，指标会虚高。
+
+### 示例一：建立带预处理的 Pipeline
+
+```python
+import numpy as np
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+
+x_train = np.array([[0.2, 10.0, 0.4], [0.9, 30.0, 1.2], [0.4, 12.0, 0.5]], dtype=np.float32)
+y_train = np.array([0, 1, 0])
+x_valid = np.array([[0.7, 25.0, 0.9], [0.1, 8.0, 0.3]], dtype=np.float32)
+
+pipeline = Pipeline([
+    ("impute", SimpleImputer(strategy="median")),
+    ("scale", StandardScaler()),
+    ("model", LogisticRegression(max_iter=500, class_weight="balanced")),
+])
+pipeline.fit(x_train, y_train)
+pred = pipeline.predict(x_valid)
+prob = pipeline.predict_proba(x_valid)[:, 1]
+print(pred.shape, prob.round(3).tolist())
+```
+
+输出的 pred shape 应为 (2,)，prob 的每个值在 0 到 1。Imputer 和 scaler 只在 fit 时读取训练集；验证集只能 transform。将它们写进 Pipeline 后，交叉验证每个 fold 都会重新拟合，减少手写流程遗漏。模型使用 float32 输入通常会被安全转换，但应在实际版本中验证 dtype 和警告。
+
+## 指标：错误的代价决定视角
+
+accuracy 是总正确率，类别不平衡时可能完全误导。唤醒词系统更关心两种错误：false positive 会打扰用户，false negative 会漏掉指令。precision 关注预测为正的样本有多少是真的，recall 关注所有正例有多少被找回，F1 是二者的调和平均。若正例很少，PR-AUC 往往比 ROC-AUC 更能反映排序质量。
+
+阈值不是训练完成后随便改的常量。用验证集选择阈值，记录阈值和目标指标；测试集只在协议最终确定后使用。若模型输出概率未校准，0.8 也不一定意味着 80% 可信。生产指标还应记录拒绝率、每类样本数和分组结果。
+
+### 示例二：同时看混淆矩阵和业务指标
+
+```python
+from sklearn.metrics import (
+    average_precision_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+)
+
+threshold = 0.65
+pred = (prob >= threshold).astype(np.int64)
+print(confusion_matrix(y_valid, pred, labels=[0, 1]))
+print({
+    "precision": precision_score(y_valid, pred, zero_division=0),
+    "recall": recall_score(y_valid, pred, zero_division=0),
+    "f1": f1_score(y_valid, pred, zero_division=0),
+    "pr_auc": average_precision_score(y_valid, prob),
+})
+```
+
+运行结果要同时显示 [TN, FP, FN, TP] 的结构和指标，不能只抄一个最高数字。阈值升高通常减少 false positive、增加 false negative，但真实方向必须由验证集测量。按 site、device_type、时间段切片后，整体 F1 很高而某一设备 recall 为 0，仍然是需要修复的结果。
+
+## 交叉验证和泄漏边界
+
+K 折交叉验证把训练数据分成多个 fold，每次用一部分训练、另一部分验证，从而估计指标波动。分类任务优先 StratifiedKFold 保持标签比例；同一用户或设备的样本不能随机散到训练和验证，应使用 GroupKFold；时间序列要按时间前进，不能让未来记录参与过去 fold。
+
+任何依赖数据的步骤都必须在 fold 内 fit。先对全量数据做缺失填充、标准化、特征选择或目标编码，再交叉验证，就是 data leakage。Pipeline 能封装大部分变换，但分组键、时间窗口和人工生成的聚合特征仍需在切分之前仔细审计。
+
+### 示例三：记录每个 fold 的结果
+
+```python
+from sklearn.model_selection import StratifiedKFold, cross_validate
+
+cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+scores = cross_validate(
+    pipeline,
+    x_all,
+    y_all,
+    cv=cv,
+    scoring={"precision": "precision", "recall": "recall", "f1": "f1"},
+    error_score="raise",
+)
+print({
+    name: (float(values.mean()), float(values.std()))
+    for name, values in scores.items()
+    if name.startswith("test_")
+})
+```
+
+输出应包含每个指标的均值和标准差。std 大说明数据量小、设备差异大或切分不稳定，不能只报均值。若使用 GroupKFold，要把 groups 传给 split；若按时间切分，则把时间顺序和训练窗口记录进实验 manifest。最终测试集应保持未触碰，作为一次性验收证据。
+
+## 运行、输出与验证
+
+一次基线运行至少保存：数据版本、特征列顺序、split 规则、随机 seed、scikit-learn 版本、模型参数、阈值、每类计数、混淆矩阵和指标。验证代码可以先检查：
+
+```python
+assert x_train.ndim == 2
+assert x_train.shape[1] == x_valid.shape[1]
+assert len(x_train) == len(y_train)
+assert np.isfinite(x_train).all()
+result = pipeline.predict_proba(x_valid)
+assert result.shape == (len(x_valid), 2)
+assert np.allclose(result.sum(axis=1), 1.0)
+print("validation: shape, labels, probabilities OK")
+```
+
+若训练和验证的指标差距很大，先检查切分、标签分布、重复样本和特征泄漏，再考虑正则化。若一个 fold 只有一个类别，调整分层方式或数据量，不要用 zero_division 把实验问题藏起来。输出的 warning、异常和耗时也应被记录，因为一次超时的训练结果不能直接用于上线决策。
+
+## 常见错误、排错与调试
+
+- accuracy 很高但正例 recall 为 0：打印标签比例和混淆矩阵，增加 balanced 指标或 PR-AUC。
+- 交叉验证分数异常完美：查重复 event_id、同一设备跨 fold、未来聚合和全量预处理，优先怀疑 leakage。
+- Pipeline 预测时报列数错误：保存 feature_names，比较训练与推理列顺序、shape 和 dtype。
+- LogisticRegression 不收敛：查看特征尺度、缺失填充和 max_iter；不要只把迭代次数无限增大。
+- 结果每次变化：固定 split random_state、模型随机状态和输入排序；记录库版本，确认并行实现的差异。
+- 线上阈值失效：在验证集按业务成本重新选择，并监控预测分布、拒答率和延迟，而不是只看离线 F1。
+
+## 练习与任务
+
+对一份带 sensor_id 的二分类 AI 数据建立 baseline：多数类、规则阈值和 Pipeline 逻辑回归各跑一次；使用按设备分组的交叉验证，选择验证集 F1 或 recall 目标下的阈值，输出混淆矩阵和每个设备的指标。测试集只能最后运行一次。
+
+<Exercise
+  title="scikit-learn 基线练习"
+  prompt="实现 run_baseline(x, y, groups)，返回每个方案的 precision、recall、f1、pr_auc 和 confusion_matrix；预处理必须放入 Pipeline，并验证同一 group 不跨训练/验证 fold。"
+  hint="先打印多数类比例；交叉验证用 GroupKFold 或 StratifiedGroupKFold；阈值只用验证预测选择。"
+  solution={`pipe = Pipeline([
+    ("impute", SimpleImputer(strategy="median")),
+    ("scale", StandardScaler()),
+    ("model", LogisticRegression(max_iter=500)),
+])
+pipe.fit(x_train, y_train)
+prob = pipe.predict_proba(x_valid)[:, 1]
+threshold = 0.65
+pred = (prob >= threshold).astype(int)
+return classification_report(y_valid, pred, output_dict=True)`}
+/>
+
+### 完整答案
+
+```python
+def choose_threshold(y_true, probabilities, minimum_recall=0.8):
+    candidates = np.linspace(0.05, 0.95, 19)
+    choices = []
+    for threshold in candidates:
+        pred = (probabilities >= threshold).astype(np.int64)
+        recall = recall_score(y_true, pred, zero_division=0)
+        precision = precision_score(y_true, pred, zero_division=0)
+        if recall >= minimum_recall:
+            choices.append((precision, threshold, recall))
+    if not choices:
+        raise ValueError("no threshold satisfies the recall target")
+    return max(choices)
+
+def evaluate_baseline(pipeline, x_train, y_train, x_valid, y_valid):
+    pipeline.fit(x_train, y_train)
+    probabilities = pipeline.predict_proba(x_valid)[:, 1]
+    precision, threshold, recall = choose_threshold(y_valid, probabilities)
+    predictions = (probabilities >= threshold).astype(np.int64)
+    return {
+        "threshold": float(threshold),
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1_score(y_valid, predictions, zero_division=0)),
+        "confusion_matrix": confusion_matrix(y_valid, predictions).tolist(),
+    }
+```
+
+用最少一个多数类基线对照，确认复杂模型确实增加了可用信号。再以 group、时间和阈值变体重复验证，保存每次的输出；如果结果差异来自切分而不是代码，报告波动本身就是重要结论。
+
+<SolutionReveal>
+  <p>模型选择不是“谁的 accuracy 最高”，而是由错误代价、数据切分、泄漏审计和可复现实验共同决定。下一节会把这条评估协议扩展为 train、validation、test 的数据集治理。</p>
+</SolutionReveal>
+
+## 与同一 AI 项目主线的连接
+
+pandas 产出的特征表经过 NumPy shape/dtype 检查后进入 Pipeline；baseline 的指标和分组报告会成为 PyTorch 模型的参照。把特征列顺序、阈值、数据版本和 split 规则写进记录，后面的 checkpoint 和推理 API 才能回答“这个服务到底复现了哪个实验”。离线评估还要为线上资源预算留位置：一个稍高的 F1 如果带来数倍延迟或内存，也不一定适合服务。
+
+## 小结
+
+scikit-learn 的价值是把预处理、模型和评估拼成可重复的实验边界。先跑多数类和规则 baseline，再把变换放入 Pipeline；用 precision、recall、F1、PR-AUC 和混淆矩阵读懂错误；用合适的分层、分组或时间交叉验证估计波动；最后一次性使用测试集。指标只有在没有泄漏、能复跑、符合业务代价时才有意义。

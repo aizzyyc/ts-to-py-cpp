@@ -1,0 +1,70 @@
+---
+import type { LessonMeta, Track } from "../lib/lessons";
+import { getLessonSection, TRACK_DESCRIPTIONS, TRACK_LABELS, TRACK_SECTION_LABELS } from "../lib/lessons";
+
+interface Props {
+  lessons: LessonMeta[];
+  currentTrack?: Track;
+  currentLessonId?: string;
+  compact?: boolean;
+}
+
+const { lessons, currentTrack, currentLessonId, compact = false } = Astro.props;
+const tracks: Track[] = ["common", "python", "cpp"];
+const sections = ["foundation", "specialization"] as const;
+---
+
+<aside class:list={["route-sidebar", { compact }]} aria-label="学习路线">
+  <div class="sidebar-heading">
+    <div>
+      <span class="eyebrow">YOUR PATH</span>
+      <h2>学习路线</h2>
+    </div>
+    <span class="sidebar-count" data-progress-count>0/{lessons.length}</span>
+  </div>
+  <button class="mobile-route-toggle" type="button" data-route-toggle aria-expanded="false">打开课程路线 <span aria-hidden="true">↘</span></button>
+  <div class="sidebar-progress" aria-hidden="true"><span data-progress-bar></span></div>
+
+  <div class="route-groups">
+    {tracks.map((track) => {
+      const trackLessons = lessons.filter((lesson) => lesson.track === track).sort((a, b) => a.order - b.order);
+      const isCurrentGroup = currentTrack === track;
+      const groups = sections
+        .map((section) => ({ section, lessons: trackLessons.filter((lesson) => getLessonSection(lesson) === section) }))
+        .filter((group) => group.lessons.length > 0);
+      return (
+        <section class:list={["route-group", { "is-current": isCurrentGroup }]} data-track={track} data-route-track={track}>
+          <div class="route-group-title">
+            <span class:list={["track-dot", track]} aria-hidden="true"></span>
+            <span>{TRACK_LABELS[track]}</span>
+            <span class="group-count">{trackLessons.length}</span>
+          </div>
+          {isCurrentGroup && <p class="route-description">{TRACK_DESCRIPTIONS[track]}</p>}
+          {groups.map(({ section, lessons: sectionLessons }) => (
+            <div class="route-subgroup" data-route-section={section}>
+              <div class="route-subgroup-title"><span>{TRACK_SECTION_LABELS[track][section]}</span><span class="group-count">{sectionLessons.length}</span></div>
+              <ol class="lesson-list">
+                {sectionLessons.map((lesson) => (
+                  <li>
+                    <a
+                      class:list={["lesson-link", { current: lesson.id === currentLessonId }]}
+                      href={`/learn/${lesson.track}/${lesson.slug}`}
+                      data-lesson-id={lesson.id}
+                    >
+                      <span class="lesson-status" aria-hidden="true">{lesson.id === currentLessonId ? "→" : "○"}</span>
+                      <span class="lesson-link-copy">
+                        <span>{lesson.title}</span>
+                        <small>{lesson.durationMinutes} min</small>
+                      </span>
+                    </a>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          ))}
+        </section>
+      );
+    })}
+  </div>
+  <a class="sidebar-reset" href="/learn" data-reset-progress>重置本设备进度</a>
+</aside>

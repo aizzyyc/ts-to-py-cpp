@@ -1,0 +1,260 @@
+---
+id: python-inference
+slug: model-inference-and-batching
+title: "模型推理、批量与资源边界"
+summary: "把训练代码改成稳定推理入口，处理 eval 模式、batch、CPU/GPU 和超时。"
+track: python
+order: 27
+durationMinutes: 18
+concepts: [inference, batching, deployment]
+prerequisites: [python-pytorch-evaluation]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+本节把训练好的 checkpoint 变成一个有边界的推理函数。完成后你能够：
+
+- 区分 model.eval、torch.no_grad 和 torch.inference_mode 的责任。
+- 设计稳定的 batch 切分，保持输入顺序、shape、dtype 和输出对应关系。
+- 为 CPU/GPU、显存、延迟和超时设定资源预算，并记录可解释的运行结果。
+- 将非法输入、模型失败、超时和资源不足映射成上层可处理的错误。
+
+## 从 JS/TS 迁移的心智模型
+
+JavaScript/TypeScript 里 async function predict(inputs) 通常关心 Promise 是否 resolve；AI 推理还要关心模型状态和批量资源。训练模型如果仍在 train 模式，Dropout 会随机变化、BatchNorm 会更新；如果保留 autograd 图，内存会随请求增长。推理入口应像一个受限的服务函数：输入契约明确，输出顺序稳定，batch 可控，超时可观测。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`async function predict(inputs) {
+  return await model.predict(inputs);
+}`}
+  targetLabel="Python / PyTorch"
+  targetLanguage="python"
+  target={`model.eval()
+with torch.inference_mode():
+    outputs = predict_in_batches(model, inputs, device, batch_size=32)`}
+/>
+
+<KeyIdea title="推理是资源受限的函数">
+  <p>同样的模型，在 batch、device、输入长度和并发不同的情况下有不同延迟和内存。正确性与资源预算必须一起验收。</p>
+</KeyIdea>
+
+## eval、no_grad 与 inference_mode
+
+model.eval() 修改 Module 的运行行为，主要影响 Dropout、BatchNorm 等有状态层；它不会关闭梯度。torch.no_grad() 关闭梯度记录，适合验证和推理；torch.inference_mode() 进一步减少 autograd 元数据，通常适合完全不需要梯度的生产推理。三者解决不同问题，不能用其中一个替代另一个。
+
+推理前加载 checkpoint、设置 device，并在入口做一次 warmup；warmup 的结果不应混入业务指标。模型和输入必须在同一 device，输出通常转到 CPU 后才转换为 NumPy 或 JSON。不要在每条请求上重新读取权重或重新创建模型，这会把冷启动成本放大成延迟。
+
+### 示例一：最小的只读推理
+
+```python
+def predict_once(model, features, device):
+    model.eval()
+    x = torch.as_tensor(features, dtype=torch.float32, device=device)
+    if x.ndim != 2 or x.shape[1] != 3:
+        raise ValueError(f"expected (batch, 3), got {tuple(x.shape)}")
+    if not torch.isfinite(x).all():
+        raise ValueError("features contain NaN or Inf")
+    with torch.inference_mode():
+        logits = model(x)
+        probabilities = logits.softmax(dim=1)
+    if not torch.isfinite(probabilities).all():
+        raise RuntimeError("model produced non-finite probabilities")
+    return probabilities.cpu()
+
+result = predict_once(model, [[0.2, 10.0, 0.4]], "cpu")
+print(tuple(result.shape), result.sum(dim=1).tolist())
+```
+
+输出应为 (1, 2) 和接近 [1.0]。batch=1 便于说明契约，但不能据此估计吞吐；实际服务要测试不同 batch 和输入长度。结果转换到 CPU 是显式边界，调用者拿到的是可序列化前的普通 Tensor，不会偷偷保留 GPU 图。
+
+## batching、顺序与内存
+
+把 N 条输入按 batch_size 分块，可以控制显存和单次 kernel 的成本。返回时按原索引拼接，不能按分数排序后直接返回，否则客户端会把结果对应到错误记录。batch 太小增加 Python、拷贝和调度开销；太大可能 OOM、增加尾延迟。选择值时用真实输入分布测量 p50、p95、p99 和峰值内存。
+
+动态 batching 可以把同时到达的请求合并，但要设置等待窗口和最大 batch；等待时间属于用户延迟。队列满时要拒绝或降级，不能无限堆积。输入最大长度、总元素数和并发请求数都应是契约，尤其是文本、音频和图像输入。
+
+### 示例二：保持顺序的分批预测
+
+```python
+def predict_in_batches(model, features, device, batch_size=32):
+    x = torch.as_tensor(features, dtype=torch.float32)
+    if x.ndim != 2 or x.shape[0] == 0:
+        raise ValueError("features must be a non-empty 2-D batch")
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    if not torch.isfinite(x).all():
+        raise ValueError("features contain NaN or Inf")
+
+    outputs = []
+    model.eval()
+    with torch.inference_mode():
+        for start in range(0, x.shape[0], batch_size):
+            batch = x[start : start + batch_size].to(device)
+            logits = model(batch)
+            if logits.shape[0] != batch.shape[0]:
+                raise RuntimeError("model changed the batch dimension")
+            outputs.append(logits.cpu())
+    result = torch.cat(outputs, dim=0)
+    assert result.shape[0] == x.shape[0]
+    return result
+
+logits = predict_in_batches(model, features, "cpu", batch_size=3)
+print(tuple(logits.shape))
+```
+
+17 条输入、batch_size=3 时应产生 6 次调用，输出第一维仍为 17。测试时让模型返回输入中的序号，能验证分块和拼接没有改变顺序。若最后 batch 过小导致某些自定义层敏感，推理已经是 eval 模式，但仍要记录该模型是否对小 batch 敏感。
+
+## 超时、设备和资源预算
+
+timeout 不是只在 HTTP 层设置一个数字。推理函数要测量预处理、host-to-device、模型前向、device-to-host 和后处理阶段；GPU 的异步执行需要在测量点同步，否则 wall time 会被低估。预算要包含队列等待，超时后要停止继续处理或取消结果，不能只忽略返回值。
+
+CPU 适合低并发、小模型或无 GPU 环境；GPU 适合足够大的 batch，但显存、上下文初始化和多进程复制成本更高。服务配置应包含 device、batch_size、max_input_rows、max_feature_count、timeout_ms 和 concurrency。超时与 OOM 要有稳定错误码，日志带 request_id、模型版本和阶段耗时，不记录原始敏感输入。
+
+### 示例三：在分批循环中执行预算检查
+
+```python
+import time
+
+class BoundedPredictor:
+    def __init__(self, model, device="cpu", batch_size=32, max_rows=512, budget_ms=200):
+        if batch_size < 1 or max_rows < 1 or budget_ms <= 0:
+            raise ValueError("batch, row limit, and budget must be positive")
+        self.model = model.to(device)
+        self.device = torch.device(device)
+        self.batch_size = batch_size
+        self.max_rows = max_rows
+        self.budget_ms = budget_ms
+        self.model.eval()
+
+    def predict(self, features):
+        started = time.perf_counter()
+        x = torch.as_tensor(features, dtype=torch.float32)
+        if x.ndim != 2 or x.shape[0] == 0 or x.shape[0] > self.max_rows:
+            raise ValueError("input rows are outside the allowed range")
+        if not torch.isfinite(x).all():
+            raise ValueError("features contain NaN or Inf")
+
+        outputs = []
+        with torch.inference_mode():
+            for start in range(0, x.shape[0], self.batch_size):
+                elapsed_ms = (time.perf_counter() - started) * 1000
+                if elapsed_ms > self.budget_ms:
+                    raise TimeoutError("inference budget exceeded")
+                batch = x[start : start + self.batch_size].to(self.device)
+                outputs.append(self.model(batch).cpu())
+        return torch.cat(outputs), (time.perf_counter() - started) * 1000
+```
+
+这段代码的预算是一个教学边界；GPU 生产实现还应在关键测量点同步，并单独统计排队和拷贝。若用异常兜底返回空结果，会让客户端误以为请求成功；应返回明确的 timeout 或 resource_exhausted，让上层选择重试、降级或提示用户。
+
+## 运行、输出与验证
+
+建立 1、3、32、33 行输入，验证输出 shape、顺序、概率和耗时：
+
+```python
+predictor = BoundedPredictor(model, device="cpu", batch_size=8, max_rows=64, budget_ms=500)
+for rows in (1, 3, 32, 33):
+    inputs = torch.arange(rows * 3, dtype=torch.float32).reshape(rows, 3)
+    outputs, elapsed_ms = predictor.predict(inputs)
+    print({
+        "rows": rows,
+        "output_shape": tuple(outputs.shape),
+        "finite": bool(torch.isfinite(outputs).all()),
+        "elapsed_ms": round(elapsed_ms, 2),
+    })
+    assert outputs.shape[0] == rows
+```
+
+输出应保持 rows 与 output_shape 第一维一致，并且每次运行都满足 finite。性能验收不能只看平均值，至少重复多次记录 p50/p95、峰值内存、冷启动和 warmup 后结果。输入超长、NaN、空 batch、预算过小和设备不可用都要有可观察错误。
+
+## 常见错误、排错与调试
+
+- 推理结果每次不同：检查 model.training、Dropout、BatchNorm、eval 和是否误用了随机增强。
+- 显存持续增长：确认 inference_mode、不要保存带图 Tensor、及时把结果转 CPU，检查缓存和动态 batch。
+- 输出顺序错位：给每条输入携带序号，验证分块前后 ID 顺序；不要按置信度排序后直接返回。
+- CPU/GPU 结果差异大：比较 dtype、checkpoint、预处理、device 算子和允许误差；不要只比较 argmax。
+- 延迟偶尔超时：分解队列、预处理、拷贝、前向、后处理；统计 p95/p99 和 batch size，不要只提高超时。
+- OOM：限制输入元素、batch 和并发，观察峰值显存；拒绝超限请求比进程崩溃更可恢复。
+- 服务重启很慢：把模型加载、设备选择和 warmup 放到启动阶段，记录加载耗时与版本。
+
+## 练习与任务
+
+实现一个 Predictor：加载给定模型，固定 eval 和 inference_mode，接受二维 float32 特征，按 batch_size 推理并保持顺序；实现 timeout_ms、最大行数和最大特征数；返回 logits、概率、request_id、模型版本和各阶段耗时。用 CPU fixture 验证 1、17、超过限制和 NaN 输入。
+
+<Exercise
+  title="受预算约束的推理练习"
+  prompt="完成 BoundedPredictor.predict，覆盖 eval、inference_mode、batch 切分、顺序、shape/dtype、finite 检查、超时和 OOM 前的输入限制；输出可序列化的结果。"
+  hint="模型在初始化时加载一次；循环前后记录 perf_counter；结果按输入顺序拼接，Tensor 转 CPU 后再转 list。"
+  solution={`model.eval()
+with torch.inference_mode():
+    outputs = []
+    for start in range(0, features.shape[0], batch_size):
+        batch = features[start:start + batch_size].to(device)
+        outputs.append(model(batch).cpu())
+return torch.cat(outputs, dim=0)`}
+/>
+
+### 完整答案
+
+```python
+class Predictor:
+    def __init__(self, model, device, batch_size=32, max_rows=512, max_features=128, timeout_ms=500):
+        self.model = model.to(device)
+        self.device = torch.device(device)
+        self.batch_size = batch_size
+        self.max_rows = max_rows
+        self.max_features = max_features
+        self.timeout_ms = timeout_ms
+        self.model.eval()
+
+    def predict(self, features, request_id, model_version):
+        started = time.perf_counter()
+        x = torch.as_tensor(features, dtype=torch.float32)
+        if x.ndim != 2:
+            raise ValueError("features must be 2-D")
+        if x.shape[0] == 0 or x.shape[0] > self.max_rows:
+            raise ValueError("row count is outside the allowed range")
+        if x.shape[1] != self.max_features:
+            raise ValueError("feature count does not match the model contract")
+        if not torch.isfinite(x).all():
+            raise ValueError("features contain NaN or Inf")
+
+        parts = []
+        with torch.inference_mode():
+            for start in range(0, x.shape[0], self.batch_size):
+                if (time.perf_counter() - started) * 1000 > self.timeout_ms:
+                    raise TimeoutError("inference timed out")
+                batch = x[start : start + self.batch_size].to(self.device)
+                parts.append(self.model(batch).cpu())
+        logits = torch.cat(parts)
+        probabilities = logits.softmax(dim=1)
+        return {
+            "request_id": request_id,
+            "model_version": model_version,
+            "rows": int(x.shape[0]),
+            "logits": logits.tolist(),
+            "probabilities": probabilities.tolist(),
+            "elapsed_ms": (time.perf_counter() - started) * 1000,
+        }
+```
+
+用固定输入检查两次结果 allclose、顺序和概率行和；用 17 行确认最后一个 batch；用超时和超长输入确认错误不会返回成功但为空。这个输出再交给 deployment 课程的 API 层时，错误类型、版本和耗时已经有稳定的内部契约。
+
+<SolutionReveal>
+  <p>推理代码的正确性包括数值结果和资源行为：eval、防梯度、batch 顺序、设备一致、超时、内存和可观测错误缺一不可。</p>
+</SolutionReveal>
+
+## 与同一 AI 项目主线的连接
+
+evaluation 选择的 checkpoint、阈值和 data_version 会被 Predictor 使用；DataLoader 的 batch 经验变成服务端的分批策略；Tensor 的 device、dtype、shape 护栏在请求入口重新出现。推理输出的 latency、错误率、拒答率和资源峰值会进入 deployment 的健康检查与 MLOps 监控。离线结果只有在相同预处理、特征顺序和模型版本下，才与线上结果可比。
+
+## 小结
+
+稳定推理需要 eval 处理模块状态，inference_mode 控制图和内存，batch 控制吞吐，device 和 dtype 控制计算位置，timeout 和输入限制控制失败边界。验证时同时检查输出 shape、顺序、有限性、概率和 p95 资源；遇到问题按预处理、拷贝、前向、后处理分阶段排错。这样模型才有资格进入 HTTP 服务。

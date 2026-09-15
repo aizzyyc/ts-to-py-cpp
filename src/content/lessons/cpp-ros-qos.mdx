@@ -1,0 +1,129 @@
+---
+id: cpp-ros-qos
+slug: ros2-qos-and-sensor-reliability
+title: "ROS 2 QoS 与传感器可靠性"
+summary: "用可靠性、持久性、历史和深度配置传感器流，定位订阅端收不到数据的问题。"
+track: cpp
+order: 32
+durationMinutes: 22
+concepts: [qos, reliability, sensor data]
+prerequisites: [cpp-ros-composition]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## ROS 2 QoS 与传感器可靠性
+
+WebSocket 的重连和缓冲能提供部分直觉，但 ROS 2 把可靠性、历史、深度、durability、deadline 和 lifespan 都变成可检查的通信策略。QoS 不是“越可靠越好”：高频相机若重传每一帧，延迟可能比丢一帧更危险；关键配置则需要可靠送达和晚加入者可获得最后值。先描述业务失败，再选策略。
+
+## 学习目标
+
+- 能把 JS/TS WebSocket 的重连与缓冲经验，提升为从“消息丢了会怎样”的业务后果选择 reliability、history、depth 和 durability。
+- 能把 WebSocket 缓冲/重连的直觉迁移成 ROS 2 的 QoS 兼容性、deadline 和 lifespan。
+- 能用 verbose topic 信息、QoS 事件和消息年龄证明传感器链路的可靠性边界。
+
+### QoS 是发布/订阅契约
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const socket = new WebSocket(url);
+socket.onmessage = handleLatest;
+// app decides what to buffer or drop`}
+  targetLabel="C++ / ROS 2"
+  targetLanguage="cpp"
+  target={`auto qos = rclcpp::QoS(rclcpp::KeepLast(5));
+qos.best_effort().durability_volatile();
+subscription_ = create_subscription<Scan>(topic, qos, callback);`}
+/>
+
+`keep_last(5)` 限制历史深度，`best_effort` 允许中间件放弃迟到样本，`volatile` 不为后来加入者保存旧数据。发布者和订阅者必须满足兼容性关系；端点都存在但 QoS 不兼容时，回调可以一次不被触发。用 `ros2 topic info --verbose` 检查实际 offered/requested QoS，不要只看源代码默认值。
+
+### 传感器流与配置事件的两个例子
+
+```cpp
+auto camera_qos = rclcpp::SensorDataQoS();
+camera_qos.keep_last(5);
+auto camera_sub = create_subscription<Image>(
+  "/camera/image", camera_qos, image_callback);
+
+auto config_qos = rclcpp::QoS{rclcpp::KeepLast(1)};
+config_qos.reliable().transient_local();
+auto config_pub = create_publisher<Config>("/sensor/config", config_qos);
+```
+
+相机/激光通常偏向小深度和新鲜度，回调来不及处理时允许丢旧帧；配置、地图或校准值可能要求 reliable，且 transient local 让后来订阅者拿到持久样本。具体兼容性还要结合 ROS 2 发行版与 RMW 实现测试，不能把 helper 名称当作跨环境的全部保证。
+
+### deadline、lifespan 和队列年龄
+
+deadline 用来观察期望发布间隔，lifespan 可以让过期消息自动失效；两者不同于“处理是否及时”。即使消息成功送达，executor 堵塞仍会让输入年龄超标。诊断应同时记录 offered/requested QoS、收到数量、deadline miss、丢弃数和消息年龄。QoS 深度不是应用有界队列的替代品，业务层仍需决定过载动作。
+
+### 常见编译、链接、运行时错误
+
+编译找不到 QoS helper，检查 `rclcpp` 版本与 include；链接/运行时 type support 错误检查消息包依赖。订阅收不到数据时先看 topic 类型、命名空间和 QoS compatibility；可靠发布者通常不能直接匹配 best-effort 订阅的所有组合。延迟不断升高时检查 history depth、executor 和 callback duration；把 depth 调大可能只会保存更多过期数据。
+
+<KeyIdea title="可靠性要结合数据年龄定义">
+  <p>传感器可靠性通常追求新鲜、有限延迟和可观测丢弃；配置可靠性才更关心完整送达和持久性。QoS、executor 和业务队列要一起验证。</p>
+</KeyIdea>
+
+## 迁移练习
+
+为高频相机流、激光扫描、关键校准和一次性告警分别选择 reliability、history/depth、durability、deadline 与 lifespan。用两个故意不兼容的端点记录工具输出，再把配置改到可连通并比较消息年龄与丢弃计数。
+
+<Exercise
+  title="为四种数据流写 QoS 决策表"
+  prompt="说明每类数据在丢失、迟到、晚加入、重传和队列满时的业务后果；写出订阅端验证命令和运行时指标。"
+  hint="相机/激光偏新鲜，配置偏完整和持久，告警还要有独立事件确认；不要只写一个 depth 数字。"
+  solution={`相机与激光可使用 SensorDataQoS/keep last/小 depth/best effort/volatile；校准用 reliable、keep last 1、按需求 transient local；告警可 reliable 并配合业务 ACK。用 ros2 topic info --verbose 验证端点，统计 deadline miss、received/dropped、输入年龄和 QoS 不匹配诊断。`}
+/>
+
+### 按数据价值选择 QoS
+
+激光雷达和相机通常追求“最新样本”，可接受少量丢帧；地图、校准参数和安全状态更重视可靠送达或 late joiner 可获取最后值。先写失败后果，再选择 `reliability`、`history`、`depth`、`durability`、`deadline` 和 `lifespan`，不要把 `reliable()` 当成万能修复。
+
+```cpp
+auto sensor_qos = rclcpp::SensorDataQoS();
+sensor_qos.keep_last(5);
+sensor_qos.best_effort();
+sensor_qos.durability_volatile();
+
+auto config_qos = rclcpp::QoS(rclcpp::KeepLast(1));
+config_qos.reliable().transient_local();
+```
+
+发布者和订阅者的策略必须兼容。传感器端用 `best_effort` 时，订阅者强制 `reliable` 可能发现端点却没有连接；反过来可靠配置流使用 volatile，也可能让晚启动节点拿不到初始值。
+
+### 深度不是吞吐量的替代品
+
+队列深度只决定允许积压多少，不会让处理能力变快。若相机每秒 30 帧而算法只能处理 10 帧，`KeepLast(100)` 会把延迟推高；对控制和避障通常宁可丢旧帧，也不要处理已经过时的结果。日志应记录 received、processed、dropped、age 和 deadline missed。
+
+### QoS 事件是运行时证据
+
+可以注册 deadline、liveliness 和 incompatible QoS 事件，在连接失败时输出 topic、端点和策略摘要。事件回调也受 executor 调度，不能在里面做阻塞诊断上传；只递增计数或写入有界诊断队列。
+
+```cpp
+rclcpp::SubscriptionOptions options;
+options.event_callbacks.incompatible_qos_callback =
+  [this](rclcpp::QOSRequestedIncompatibleQoSInfo& event) {
+    ++incompatible_qos_count_;
+    RCLCPP_WARN(get_logger(), "incompatible QoS total=%d",
+                event.total_count);
+  };
+```
+
+用 `ros2 topic info --verbose /camera/image_raw` 对比两端的 reliability、durability、history 和 depth；再用故意不兼容的测试 publisher 重现事件，证明监控真的有效。
+
+### 传感器可靠性的验收矩阵
+
+离线测试覆盖消息内容，QoS 集成测试覆盖连接和丢失：启动顺序交换、短暂停止 publisher、网络抖动、队列满、仿真暂停和恢复。对 IMU、相机、雷达分别定义允许的最大 age；对底盘控制定义失联后的安全输出。不要把 DDS 自动重连当作急停策略，安全停机必须是独立链路。
+
+### “收不到数据”的排错顺序
+
+先查 topic 名称和类型，再查 domain、namespace 与端点数量，接着查 QoS，最后查回调和处理耗时。`ros2 topic echo` 也要使用与系统相符的 QoS；它默认策略不一定适合 best-effort 传感器。把一个最小 publisher、最小 subscriber 和 `ros2 topic info --verbose` 命令放进回归脚本，避免现场靠猜。
+
+<SolutionReveal>
+  <p>QoS 的学习成果是能从业务后果推导策略，并用工具验证发布/订阅确实兼容。下一节会把算法实现放进可运行时加载的插件边界。</p>
+</SolutionReveal>

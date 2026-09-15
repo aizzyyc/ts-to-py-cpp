@@ -1,0 +1,197 @@
+---
+id: cpp-values
+slug: values-references-and-pointers
+title: "值、引用与指针"
+summary: "用可视化的内存直觉理解 C++ 为什么需要引用和指针。"
+track: cpp
+order: 4
+durationMinutes: 14
+concepts: [memory, references, pointers]
+prerequisites: [cpp-toolchain]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+本节结束时，你能画出值、引用和指针的关系，知道什么时候只是复制数据、什么时候创建别名、什么时候需要可为空的地址；能用 const T& 读取大对象，用 std::span 表达一段缓冲，并识别空指针、越界、悬空引用和返回局部地址等未定义行为。
+
+## JS/TS 的引用直觉不能直接套用
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'const alias = reading; alias.value = 2.4;'} targetLabel="C++" targetLanguage="cpp" target={'Reading& alias{reading}; alias.value_m = 2.4;'} />
+
+JS/TS 中 const alias = object 通常复制的是对象引用，两个变量会观察到同一对象；C++ 的 Reading copy = reading 默认复制对象内容，之后互不影响。C++ 的 Reading& alias = reading 才是别名，而且不能为空；Reading* ptr = &reading 是一个保存地址的值，可以为空，也可以改指向别的对象。
+
+反例是把所有 C++ 参数都写成指针，仿佛这样就和 JS 对象一样。指针会引入空值、生命周期和所有权问题。若函数必须接收一个对象且只读，用 const T&；如果“没有对象”是合法状态，用 T* 或 std::optional 明确表达；如果函数接管释放责任，应该使用智能指针，而不是裸指针加注释。
+
+## 示例一：值、引用和指针的三种行为
+
+~~~cpp
+#include <iostream>
+
+struct Reading { double value_m; };
+
+void set_by_value(Reading reading) { reading.value_m = 2.0; }
+void set_by_reference(Reading& reading) { reading.value_m = 3.0; }
+void set_by_pointer(Reading* reading) {
+  if (reading != nullptr) reading->value_m = 4.0;
+}
+
+int main() {
+  Reading reading{1.0};
+  set_by_value(reading);
+  std::cout << reading.value_m << "\n";
+  set_by_reference(reading);
+  std::cout << reading.value_m << "\n";
+  set_by_pointer(&reading);
+  std::cout << reading.value_m << "\n";
+}
+~~~
+
+编译运行后输出 1、3、4。按值函数改的是副本，引用函数必须拿到有效对象，指针函数可以在传入 nullptr 时不做事。箭头运算符 reading->value_m 等价于 (*reading).value_m，但前提是指针有效。验证时要额外测试 set_by_pointer(nullptr)，并确认它不会解引用空地址。
+
+## 示例二：const 引用避免复制
+
+~~~cpp
+#include <iostream>
+#include <vector>
+
+double max_range(const std::vector<double>& ranges) {
+  double result{0.0};
+  for (const double range_m : ranges) {
+    if (range_m > result) result = range_m;
+  }
+  return result;
+}
+
+int main() {
+  const std::vector<double> ranges{0.8, 1.2, 0.6};
+  std::cout << max_range(ranges) << "\n";
+}
+~~~
+
+函数只读调用者的 vector，不复制整个缓冲，也不能修改它。使用 const vector of double reference 是“必需存在、只借用”的契约；如果改成值传参，结果可能相同，但大帧数据会额外复制。编译时可用调试器或日志确认输入未被改变，性能分析再决定是否需要更复杂的零拷贝设计。
+
+## 示例三：用 span 表达连续缓冲
+
+std::span 不拥有数据，它把起始地址和长度放在一起，比裸指针更难忘记长度。
+
+~~~cpp
+#include <iostream>
+#include <span>
+
+double average(std::span<const double> samples) {
+  if (samples.empty()) return 0.0;
+  double sum{0.0};
+  for (const double sample : samples) sum += sample;
+  return sum / static_cast<double>(samples.size());
+}
+
+int main() {
+  double frame[]{1.0, 2.0, 3.0};
+  std::cout << average(frame) << "\n";
+}
+~~~
+
+用 C++20 编译，输出 2。同一个函数也能接收 std::vector of double 的连续区域。注意 span 的生命周期不超过底层数组；把局部数组的 span 返回出去仍会悬空。它解决的是“地址加长度”契约，不解决所有权。
+
+## 生命周期：引用什么时候会悬空
+
+~~~cpp
+const double& bad_reference() {
+  const double local{1.0};
+  return local; // 错误：函数返回后 local 已销毁
+}
+~~~
+
+编译器可能给出 warning，但如果继续运行，使用返回值就是未定义行为。类似地，保存 vector 元素的引用后再让 vector 扩容，引用可能失效；保存局部对象地址交给异步回调，也会在回调执行时访问无效内存。把“谁拥有对象、对象活多久、回调何时执行”写清楚，比记住某个指针技巧更重要。
+
+## 数组边界和未定义行为
+
+原生数组不会自动携带长度。for 循环的下标如果超过 count 就会多访问一个元素，ptr[i] 不会自动检查边界。优先使用 vector::at 做调试期检查，或传递 span；在编译命令中加入 -fsanitize=address,undefined -g，运行测试用例观察 sanitizer 报告。sanitizer 能指出许多内存错误，但不能证明所有并发或业务逻辑都安全。
+
+## 编译、运行与调试路径
+
+把示例保存为 memory.cpp，使用 c++ -std=c++20 -Wall -Wextra -Wpedantic -fsanitize=address,undefined -g memory.cpp -o memory。先用正常输入验证输出，再故意访问越界观察 sanitizer 的栈回溯。若看到 dangling reference 或 heap-use-after-free，先找对象最后一次有效的作用域，不要只在崩溃位置添加空判断；空判断无法修复已经失效的地址。
+
+## 机器人连接：传感器帧的借用与所有权
+
+相机帧、点云和激光扫描往往很大。回调可以借用一个只读 span 做快速校验，消息队列需要跨线程保存时则必须拥有数据或延长其生命周期。不要把一个局部数组的裸指针放进异步任务，也不要把 SDK 管理的缓冲当成可以 delete 的内存。复制、借用、移动和共享所有权是性能与安全的共同问题。
+
+<KeyIdea title="指针只是地址，不是所有权证明">
+  <p>引用表达必有对象，指针表达可能为空的地址，智能指针才表达某种所有权。每次看到裸指针，都要追问它指向谁、能活多久、谁负责释放。</p>
+</KeyIdea>
+
+## 动手练习
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'function inspect(reading: Reading) {}'} targetLabel="C++" targetLanguage="cpp" target={'void inspect(const Reading& reading) {}'} />
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'const bytes = new Uint8Array(buffer);'} targetLabel="C++" targetLanguage="cpp" target={'std::span<const std::byte> bytes{buffer};'} />
+
+实现 clamp_ranges，接收一个可写的连续 double 缓冲，把小于 0.2 的距离改成 0.2，大于 5.0 的改成 5.0；再实现只读的 count_valid。用原生数组和 vector 各调用一次，并测试空 span。
+
+<Exercise title="为传感器缓冲选择正确的参数类型" prompt="写出两个函数签名：一个会原地修改帧，一个只读取帧；解释为什么二者不能都使用 double*，以及调用后如何验证原数组确实改变。" hint="修改函数使用 std::span<double>，只读函数使用 std::span<const double>；检查 empty() 后再做统计。" solution="修改函数遍历 span<double> 并写回；只读函数接收 span<const double>，统计前先检查 empty；调用后打印原数组首尾元素。" />
+
+## 延伸实践与验证
+
+
+## 画出对象、别名和地址
+
+可以把一个 Reading 想成一块存储，值变量拥有这块存储，引用是这块存储的另一个名字，指针则保存这块存储的地址。值复制后产生第二块独立存储；引用没有自己的对象；指针本身有存储，但它指向的对象可能属于其他作用域。这个模型比“引用就是指针”更准确，因为引用通常必须绑定且不能重新绑定。
+
+当一个函数只观察输入，const reference 是很好的默认选择；当函数修改调用者，使用 non-const reference 并让修改意图明显；当没有对象是正常分支，使用 pointer 或 optional；当需要跨作用域保留数据，必须转移或共享所有权。参数形式是在设计 API，不是为了让代码看起来像某种语言。
+
+## 示例四：观察者不接管资源
+
+~~~cpp
+#include <iostream>
+#include <memory>
+
+void print_sequence(const int* sequence) {
+  if (sequence == nullptr) {
+    std::cout << "missing\n";
+    return;
+  }
+  std::cout << *sequence << "\n";
+}
+
+int main() {
+  auto owner = std::make_unique<int>(42);
+  print_sequence(owner.get());
+  print_sequence(nullptr);
+}
+~~~
+
+输出是 42 和 missing。print_sequence 只观察，不 delete owner.get()；owner 在 main 结束时负责释放。若把 owner 提前销毁后仍调用 print_sequence，指针就悬空，空判断也救不了。验证时要把所有权和借用的时长写在调用关系里，而不是把 get 返回值保存到全局变量。
+
+## vector 扩容为什么会破坏别名
+
+vector 为了保持连续存储，容量不足时会申请新缓冲并移动或复制元素。扩容后，旧元素的地址、引用和 iterator 可能全部失效。一个常见错误是先保存 first = values.data()，再 push_back，之后继续访问 first。reserve 可以减少扩容次数，但不能让未来所有操作都不失效；如果容量超过预留值，仍然会重新分配。
+
+传感器帧处理时，最好让一个阶段完成读取和校验，再把稳定的 owner 交给下一个阶段。不要在生产者扩容 vector 的同时让消费者持有其中元素的引用。跨线程还需要同步，生命周期正确不等于数据竞争安全。
+
+## 诊断内存问题的方法
+
+先用最小数据复现，再开启 AddressSanitizer 和 UndefinedBehaviorSanitizer。看到 heap-use-after-free 时，沿着分配、借用、释放三条路径回溯；看到 stack-use-after-scope 时，查异步任务是否保存了局部变量引用；看到 heap-buffer-overflow 时，查长度来源和循环的半开区间。不要只在崩溃行添加 nullptr 判断，因为悬空地址通常非空。
+
+调试器中观察对象地址、vector 的 size 和 capacity，能够确认是否发生重新分配。日志中记录帧序号比只记录地址更有用：地址变化可能完全正常，序号跳回或跨线程乱序才可能是消息管线问题。
+
+## 机器人连接：借用、复制和跨线程保存
+
+同步滤波函数可以接收 const span，避免复制整帧；消息队列需要保存数据时，队列必须拥有一份可独立释放的对象。图像和点云通常不适合在每个回调层复制，可以让设备层提供明确的 buffer owner，再把只读视图传给算法。视图不能比 owner 活得更久，也不能绕过 SDK 的释放协议。
+
+<KeyIdea title="生命周期问题要沿时间线排查">
+  <p>从创建、借用、异步排队到销毁画一条时间线，确认每一次访问都落在对象有效区间内。地址非空、程序偶尔不崩溃，都不能证明借用安全。</p>
+</KeyIdea>
+
+
+<SolutionReveal>
+  <p>打开答案后，请把示例改成自己的传感器数据，再用编译器、运行输出和边界输入验证，而不是只对照文字。</p>
+</SolutionReveal>
+
+## 小结与下一步
+
+  值语义让复制后的对象独立，引用让函数借用一个必有对象，指针让“可能为空的地址”显式出现，span 则把连续数据和长度放在一起。下一节将把这些参数放进函数声明、头文件和多文件链接边界中，学习如何让模块之间的契约稳定。

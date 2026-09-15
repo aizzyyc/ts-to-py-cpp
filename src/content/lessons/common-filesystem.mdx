@@ -1,0 +1,83 @@
+---
+id: common-filesystem
+slug: filesystem-paths-and-portability
+title: "文件系统、路径与跨平台"
+summary: "从 Node.js path 经验出发，处理路径、编码、目录和权限的跨平台差异。"
+track: common
+order: 12
+durationMinutes: 14
+concepts: [filesystem, paths, portability]
+prerequisites: [common-boundaries]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 文件系统、路径与跨平台
+
+Node.js 的 `path.join` 已经提示了跨平台问题。Python `pathlib` 和 C++ `filesystem` 继续把路径建模为对象，并让目录、扩展名和存在性判断更清晰。迁移文件处理时，不要假设当前工作目录、斜杠、编码或权限都和 Node 开发机一致。AI 数据集通常很大，机器人日志还可能写在只读或空间有限的设备上，路径和 IO 错误必须成为明确的工程边界。
+
+### 路径是数据，不是字符串拼接
+
+下面这段代码只保留同一个意图，重点观察输入边界、数据流和失败语义，而不是逐字符翻译。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const input = path.join(process.cwd(), "data", "events.json");
+const text = await fs.promises.readFile(input, "utf8");`}
+  targetLabel="Python / C++"
+  targetLanguage="text"
+  target={`# Python
+from pathlib import Path
+input_path = Path.cwd() / "data" / "events.json"
+text = input_path.read_text(encoding="utf-8")
+
+// C++
+std::filesystem::path input =
+    std::filesystem::current_path() / "data" / "events.json";`}
+/>
+
+### 路径解析与编码
+
+路径是数据，不是字符串拼接。用 `resolve`/`absolute` 后再判断是否位于允许的根目录；相对路径要明确相对于配置文件、项目目录还是进程启动目录。文本文件指定 UTF-8 和换行策略，二进制图像使用字节读取，不要因为扩展名就假设内容一定合法。写文件时先创建父目录、使用临时文件再原子替换，避免进程中断留下半个模型或日志。
+
+```python
+import json
+from pathlib import Path
+
+def read_events(root: Path, relative: str) -> list[dict]:
+    candidate = (root / relative).resolve()
+    if root.resolve() not in candidate.parents:
+        raise ValueError("path escapes data root")
+    return json.loads(candidate.read_text(encoding="utf-8"))
+```
+
+### 跨平台与权限差异
+
+Windows 路径可能包含盘符和大小写不敏感的比较，Linux 还区分大小写；路径长度、符号链接和权限模型也不同。不要在业务中硬编码 `/tmp`、反斜杠或用户目录。C++ 的 `std::filesystem::path` 应交给系统拼接，Python 的 `Path` 可直接参与 `/` 运算，Node 则用 `path.resolve`。容器和机器人设备上还要检查挂载点、剩余空间和运行用户。
+
+### 常见错误与排错思路
+
+常见错误是测试从 IDE 启动能找到文件，CI 或 CLI 从另一个目录启动就失败；另一个是把权限不足当成文件不存在。排错时打印安全的绝对路径、当前工作目录、文件大小和错误类别，比较解析前后的路径；若怀疑符号链接或路径穿越，记录 `resolve` 后的结果并用边界测试验证。不要直接把用户提供的路径拼进命令或日志。
+
+<KeyIdea title="路径是数据，不是字符串拼接">
+  <p>把路径、编码和错误当作接口的一部分，脚本才有资格进入 AI 或机器人流水线；可写根目录也必须由配置显式指定。</p>
+</KeyIdea>
+
+## 迁移练习
+
+请完成：写一个读取 data/events.json 的函数，要求在 Windows 和 Linux 上都能运行，并拒绝跳出 data 根目录的相对路径。分别设计文件不存在、权限不足和 JSON 格式错误的报告。
+
+<Exercise
+  title="文件系统、路径与跨平台练习"
+  prompt="写一个读取 data/events.json 的函数，要求在 Windows 和 Linux 上都能运行，并拒绝跳出 data 根目录的相对路径。分别设计文件不存在、权限不足和 JSON 格式错误的报告。"
+  hint="使用路径 API，不要手写斜杠；测试时从不同工作目录启动，并先比较 resolve 后的父目录。"
+  solution={`Python 用 root / relative 后 resolve，确认结果仍在 root 内，再用 UTF-8 读取；C++ 用 filesystem::path 和 ifstream。不存在、权限不足与解析错误使用不同错误码，日志记录相对标识而不是泄露整台机器的目录结构。`}
+/>
+
+<SolutionReveal>
+  <p>把路径、编码和错误当作接口的一部分，脚本才有资格进入 AI 或机器人流水线。完成后，再用不同工作目录和不同运行用户启动一次，验证程序没有依赖开发机偶然状态。</p>
+</SolutionReveal>

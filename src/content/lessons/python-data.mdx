@@ -1,0 +1,183 @@
+---
+id: python-data
+slug: ai-data-inputs
+title: "AI 数据输入：从 JSON 到特征表"
+summary: "理解 AI 应用前的数据清洗、结构化和输入校验。"
+track: python
+order: 16
+durationMinutes: 12
+concepts: [data, validation, ai, json]
+prerequisites: [python-iterators]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标：把 JSON 事件变成可审核特征表
+
+本节结束时，你能把 JavaScript/TypeScript 中的 `events.map(...)` 迁移成 Python 的确定性数据管线：读取 JSON 事件，处理缺失值和非法值，按时间顺序生成特征与标签，并输出可以复核的记录、丢弃原因和统计 sidecar。你会理解“数据准备正确”不等于“模型调用成功”，并能用运行输出验证输入没有被偷偷修改、零值没有被误删、未来信息没有泄漏。
+
+AI 应用的失败经常发生在模型调用之前：字段缺失、单位混乱、事件乱序、重复 ID、标签生成时间错误或整列被填成零。Python 的列表、字典和生成器足够表达一条小管线，但每一步都要有契约和统计。最终交付物不只是 feature matrix，还包括来源、版本、拒绝理由和可重放的输入摘要。
+
+## 从 JS/TS 迁移的心智模型：map 之后还需要数据契约
+
+JavaScript/TypeScript 的 `map` 很适合表达“一条事件变成一行”，但 `Number(value)` 可能把空字符串变成 0，`filter(Boolean)` 可能误删合法零，异步读取和数组顺序也未必代表事件时间顺序。Python 的列表推导式同样不会自动做校验；应先把原始 JSON 当作不可信对象，再让一个纯函数返回 feature 或明确的拒绝原因。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const rows = events.map(({ value }) => ({
+  feature: Number(value),
+}));`}
+  targetLabel="Python"
+  targetLanguage="python"
+  target={`rows = []
+for event in events:
+    feature, reason = to_feature(event)
+    if reason is None:
+        rows.append(feature)`}
+/>
+
+### 1. JSON 事件：解析、字段来源和不可变输入
+
+`json.loads` 只负责把 JSON 文本变成 Python 值，不负责保证结果是 dict，也不负责字段类型。JSONL 读取时要保留行号；事件流读取时要保留 event ID 和接收时间。特征函数不要在原始事件上直接 `pop` 或写入新字段，否则重放和审计会看到被修改过的输入。推荐返回 `(feature, reason)`，让主流程同时收集成功和失败。
+
+```python
+import json
+from math import isfinite
+
+def parse_json_event(line: str, line_number: int) -> tuple[dict[str, object] | None, str | None]:
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return None, f"invalid_json_line_{line_number}"
+    if not isinstance(event, dict):
+        return None, "event_not_object"
+    if not isinstance(event.get("id"), str) or not event["id"].strip():
+        return None, "id_missing"
+    return event, None
+
+def to_feature(event: dict[str, object]) -> tuple[dict[str, object] | None, str | None]:
+    value = event.get("value")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None, "value_not_number"
+    value = float(value)
+    if not isfinite(value):
+        return None, "value_not_finite"
+    if not 0 <= value <= 100:
+        return None, "value_out_of_range"
+    text = event.get("text", "")
+    if not isinstance(text, str) or not text.strip():
+        return None, "text_empty"
+    return {"id": event["id"], "feature": value / 100, "text": text.strip()}, None
+```
+
+这里把 bool 排除，是因为 Python 中 `bool` 是 `int` 的子类；把 NaN 和无穷大排除，是因为它们会通过部分数值转换却破坏均值、排序和模型输入。是否接受字符串数字要在契约中明确，不能让一个入口接受、另一个入口拒绝。文本清洗也应记录最大长度、Unicode 规范化和空白规则。
+
+### 2. 缺失值：0、None、NaN 和 unknown 不是一回事
+
+缺失数值可能表示采集失败、传感器暂时离线、字段不适用或真的测到了 0。用 `or 0` 统一填零会把这些语义混在一起；用全量数据计算均值又可能把验证集信息泄漏到训练。可以删除样本、使用仅由训练集计算的中位数填补、增加 `is_missing` 指示列，或让模型处理缺失，但必须记录选择和统计。
+
+类别字段要固定映射，例如 `{"cat": 0, "dog": 1, "unknown": 2}`；未知类别不要按本次文件的出现顺序生成新编号。文本缺失可能要变成明确的空文本或拒绝，取决于模型契约。输出中同时保存原始缺失原因和填补后的字段，审核者才知道模型看到的值不是采集到的原值。
+
+```python
+def normalize_value(event: dict[str, object]) -> tuple[float, int, str | None]:
+    raw = event.get("value")
+    if raw is None:
+        return 0.0, 1, "missing"
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return 0.0, 1, "not_numeric"
+    value = float(raw)
+    if value != value:
+        return 0.0, 1, "nan"
+    return value, 0, None
+```
+
+这个函数只是示范一种“均值为零的占位”策略，生产系统不能把 0 当成通用答案。若使用训练集统计量，应在训练阶段保存 `imputer_version` 和统计值，在推理阶段只加载它们；若使用 missing indicator，要把它当成模型输入的一部分并在特征 schema 中登记。
+
+### 3. 时间、标签与因果顺序
+
+特征只能使用预测时已经知道的信息。若今天 10:00 做预测，不能使用 10:30 才到达的事件；用未来一天的平均值预测今天的故障就是标签泄漏，即使代码看起来只是一次 `groupby`。事件应按业务时间排序，处理重复 ID、乱序和迟到事件，明确窗口端点、时区和 watermark。标签也要写出生成时间和观察窗口，例如“未来 24 小时是否发生故障”。
+
+训练/验证切分优先按时间或实体切分，而不是随机把同一设备相邻事件打散到两边。特征表应保留 `feature_as_of`、`label_as_of` 或等价元数据，审计时能回答某个数字在当时是否可见。重跑同一输入时，固定排序和版本，避免因为字典或到达顺序变化产生不同训练集。
+
+### 4. 可审核输出：特征、原因和统计一起交付
+
+一条合法记录应包含稳定的 ID、归一化特征、来源事件时间、schema version 和处理版本；一条非法记录不应悄悄消失，而应进入 reasons 输出，至少包含 ID、原因代码和安全摘要。sidecar 统计记录 input、kept、dropped、每种原因、特征范围、标签计数和输入哈希。不要只输出 CSV，因为 CSV 无法说明被丢弃了什么。
+
+```python
+from collections import Counter
+
+def prepare_events(events: list[dict[str, object]]) -> tuple[list[dict], dict]:
+    features: list[dict] = []
+    reasons: list[dict] = []
+    counts = Counter()
+    for position, event in enumerate(events):
+        feature, reason = to_feature(event)
+        if feature is None:
+            code = reason or "unknown_error"
+            counts[code] += 1
+            reasons.append({"position": position, "id": event.get("id"), "reason": code})
+        else:
+            features.append(feature)
+    stats = {
+        "input": len(events),
+        "kept": len(features),
+        "dropped": len(reasons),
+        "dropped_by_reason": dict(counts),
+    }
+    return features, {"reasons": reasons, "stats": stats}
+```
+
+输出顺序默认保持输入顺序；如果业务需要按事件时间排序，应在契约和测试中明确排序键。理由清单不能包含完整文本或 token，可以保存内部 ID、行号、哈希和简短错误码。这样数据源团队能修复输入，模型团队也能解释样本数量变化。
+
+## 运行验证：用固定输入观察输出和统计
+
+准备 6 条事件：合法 value=0、合法 value=50、缺失 value、value=101、value 为 NaN、合法中文 text；另加一条坏 JSON 行。运行管线后，预期零值被保留，超范围和非有限值被拒绝，合法文本经过 trim，features 顺序稳定，stats 中 `input`、`kept`、`dropped` 和 `dropped_by_reason` 相加一致。输出应是 JSON 可序列化的字典，不应修改原始 events。
+
+运行命令可以是 `python -m pytest tests/test_data_pipeline.py -q`，再用一个小 JSONL fixture 运行 CLI，检查特征表和 reasons sidecar。验证标签时构造一个未来事件，确认它不会进入当前时间窗口；验证缺失策略时比较 missing indicator 和填充值，不能只检查模型最后有没有报错。
+
+## 常见错误、排错与调试路径
+
+`bool` 会被当成数字，`float("nan")` 会通过转换，`filter(Boolean)` 或 `if not value` 会误删 0，`Number("")` 可能产生意外 0；这些都是 JS/TS 到 Python 迁移时的高频陷阱。另一个严重问题是先用全量数据计算均值、词表或类别编码，再切训练/测试，造成泄漏。标签窗口如果没有时区和端点，也会出现边界样本重复或缺失。
+
+排错先看统计：按 reason、来源、schema version 和时间窗口分组输入/保留/拒绝数量；再打印安全的字段类型、特征范围和标签计数。若模型突然全预测一个类别，先检查缺失率、归一化范围、标签分布和训练/验证时间顺序。若结果不可重现，比较输入哈希、排序键、随机种子、处理版本和原始文件是否被修改。
+
+## 练习：输出可审核的特征记录
+
+任务是实现 `prepare_events(events)`，返回 `features`、`reasons` 和可 JSON 序列化的 `stats`：合法事件输出归一化数值与清洗文本，非法事件只记录原因和事件 ID；要求结果顺序稳定、输入不被修改、0 被保留、NaN 被拒绝，并说明缺失值是删除、填补还是加 indicator。再设计一个测试证明未来事件不会影响当前标签。
+
+<KeyIdea title="特征是契约，不是随手取的字段">
+  <p>给每个特征写清单位、范围、缺失值策略、时间可见性和来源。未来更换模型或 AI 服务时，输入契约仍然应该稳定。</p>
+</KeyIdea>
+
+<Exercise
+  title="把输入变成可检查的特征"
+  prompt="实现 prepare_events(events)，返回 features、dropped_by_reason 和总计数；非数字、缺失或超出 0–100 的 value 都忽略，并保留稳定顺序。"
+  hint="先写一个返回 (feature, reason) 的纯函数；主流程只负责遍历、收集原因和构造统计，不要修改 event。"
+  solution={`features = []
+dropped = {}
+for event in events:
+    feature, reason = to_feature(event)
+    if feature is None:
+        dropped[reason] = dropped.get(reason, 0) + 1
+    else:
+        features.append(feature)
+stats = {"input": len(events), "kept": len(features), "dropped": dropped}`}
+/>
+
+<SolutionReveal>
+  <p>用 value 为 0、缺失、NaN、101 和合法中文文本的样本验收。特别确认零被保留、NaN 被拒绝、原始 event 没有新增字段；保存 reasons 和 stats sidecar，才能让训练或推理输入可审核、可重放。</p>
+</SolutionReveal>
+
+## 与 AI 数据管线、模型和推理服务连接
+
+这条 JSON 到特征表的管线可以为监督学习、embedding、检索、异常检测和在线推理准备输入。训练和线上预测必须共享字段定义、单位、缺失策略、类别映射和版本；否则离线指标再高，服务收到的特征也可能不在同一分布。标签生成要与预测时间分离，避免把未来结果泄漏给模型。
+
+可审核输出对 AI 服务也很重要：模型请求前保存输入 schema、特征统计、来源 ID 和处理版本，服务返回后保存 request ID、模型版本、状态和结果摘要。失败事件进入可重放队列，坏数据进入隔离文件，不能用空特征或默认标签伪装成成功。这样数据质量、模型行为和服务可用性可以分别监控。
+
+## 小结
+
+可靠的数据准备不是一条 `map`：它要明确 JSON 解析、字段校验、缺失值语义、时间可见性、标签窗口、稳定排序和可审核统计。运行验证要检查实际输入、输出、拒绝原因、标签因果顺序和原始数据不变；这些确定性证据是 AI 模型和推理服务可信运行的前提。

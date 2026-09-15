@@ -1,0 +1,171 @@
+---
+id: python-http
+slug: http-clients-and-service-boundaries
+title: "HTTP 客户端与服务边界"
+summary: "使用 Python 调用外部服务，并区分网络失败、业务失败和数据校验失败。"
+track: python
+order: 9
+durationMinutes: 16
+concepts: [http, clients, validation]
+prerequisites: [python-testing]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标：把 HTTP 请求拆成可验证边界
+
+本节结束时，你应能从 JavaScript/TypeScript 的 `fetch` 迁移到 Python 的 `urllib.request` 和 requests 风格客户端，并说清楚一次调用到底失败在哪里。具体来说，你会完成四件事：为连接和读取设置超时；区分 2xx、4xx、5xx 与网络异常；把 JSON 从字节解码成经过字段校验的对象；在 AI 数据管线中给调用者返回稳定、可排错的错误语义。
+
+不要把“请求成功”理解为“拿到了一个响应对象”。DNS、TCP/TLS、HTTP 状态、响应体解码和业务字段是不同的边界。比如推理服务返回 200，但 JSON 缺少 `label`，这不是网络故障，却同样不能把结果交给下游模型。我们会用小的、可以在本地运行的函数逐层确认这些行为。
+
+## 从 JS/TS 迁移的心智模型：fetch 不是一个完整契约
+
+在 JS/TS 中，`fetch` 对 404 通常仍然 resolve，你必须检查 `response.ok`；Python 标准库的 `urlopen` 对部分非 2xx 会抛 `HTTPError`，而 requests 风格通常先得到 `Response`，再由 `raise_for_status()` 把状态转成异常。两种库的差别不应泄漏到业务层：业务层只需要知道“暂时不可用”“调用方请求不合法”或“上游返回了坏数据”。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const response = await fetch(url, { method: "POST", body: JSON.stringify(input) });
+if (!response.ok) throw new Error("HTTP " + response.status);
+return await response.json();`}
+  targetLabel="Python"
+  targetLanguage="python"
+  target={`with requests.Session() as session:
+    response = session.post(url, json=input, timeout=(2, 5))
+    response.raise_for_status()
+    return response.json()`}
+/>
+
+### 1. urllib：字节、上下文和异常
+
+`urllib.request` 是 Python 标准库，不需要额外安装。`Request` 负责方法、请求头和已经编码好的 body；`urlopen` 负责打开连接并返回一个需要关闭的响应对象。`urlopen` 的 `timeout` 是等待网络操作的秒数，不是“整个业务一定在这个时间内结束”的承诺。响应体是 bytes，必须显式用 UTF-8 解码，再交给 `json.loads`；因此“能读取”与“是合法 JSON”是两件事。
+
+```python
+import json
+from urllib.request import Request, urlopen
+
+def get_json(url: str) -> dict[str, object]:
+    request = Request(url, headers={"Accept": "application/json"})
+    with urlopen(request, timeout=5) as response:
+        if response.status < 200 or response.status >= 300:
+            raise RuntimeError(f"unexpected status: {response.status}")
+        raw = response.read()
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("response JSON must be an object")
+    return payload
+```
+
+这段代码有三个值得迁移的细节。第一，`with` 让套接字在成功和异常路径都释放；第二，状态判断发生在业务解析之前，避免把错误页面当 JSON；第三，类型校验发生在边界，后面的代码可以依赖返回值是字典。生产代码还要把 `HTTPError`、`URLError`、`TimeoutError` 映射成自己的异常类型，而不是让每个调用点了解 urllib 的继承关系。
+
+### 2. requests 风格：Session、JSON 和超时预算
+
+requests 风格的客户端把 JSON 编码、响应头和常用异常包装得更方便。`json=input` 会把 Python 对象编码成 JSON 并设置合适的 body；`response.json()` 只负责解析，不负责验证业务字段；`raise_for_status()` 只负责把 4xx/5xx 变成 HTTP 异常。`timeout=5` 也不是从发送到业务完成的精确总预算，实际应用应根据库支持拆出连接、读取和外层总时间。
+
+```python
+import math
+import requests
+
+class UpstreamUnavailable(RuntimeError):
+    pass
+
+class UpstreamRejected(RuntimeError):
+    pass
+
+class InvalidUpstreamResponse(ValueError):
+    pass
+
+def classify(session: requests.Session, url: str, text: str) -> dict[str, object]:
+    try:
+        response = session.post(url, json={"text": text}, timeout=(2, 5))
+        if 400 <= response.status_code < 500:
+            raise UpstreamRejected(f"upstream rejected request: {response.status_code}")
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.Timeout, requests.ConnectionError) as exc:
+        raise UpstreamUnavailable("classifier network failure") from exc
+    except requests.exceptions.JSONDecodeError as exc:
+        raise InvalidUpstreamResponse("classifier returned invalid JSON") from exc
+
+    score = payload.get("score") if isinstance(payload, dict) else None
+    if (not isinstance(payload, dict)
+            or not isinstance(payload.get("label"), str)
+            or not payload["label"].strip()
+            or not isinstance(score, (int, float))
+            or isinstance(score, bool)
+            or not math.isfinite(float(score))
+            or not 0 <= float(score) <= 1):
+        raise InvalidUpstreamResponse("label or score is missing or invalid")
+    return {"label": payload["label"], "score": float(score)}
+```
+
+这里故意把 4xx 和网络失败分开。401、403、422 往往需要修复凭据或输入，盲目重试没有意义；连接断开、超时和某些 502 可能暂时恢复，但 POST 是否可重试还要看幂等键。代码中 `raise ... from exc` 保留底层原因，日志和测试都能看到错误链。
+
+### 3. 状态码、JSON 和错误边界
+
+建议先建立一张状态决策表，再写代码。2xx 表示传输层接受，但仍需要 JSON schema 校验；400、401、403、404、422 通常是请求或权限问题；429 表示速率限制，要尊重 `Retry-After`；500、502、503、504 是服务端或网关问题，是否重试取决于操作是否幂等。网络超时还可能发生在“服务已经完成但响应没回来”的窗口，所以写操作必须使用请求 ID 或幂等键。
+
+错误边界最好只做一次翻译：库函数捕获它能识别的 requests/urllib 异常，抛出 `UpstreamUnavailable` 等稳定类型；HTTP 路由层再把它转成 502、504 或 4xx。不要 `except Exception: return None`，因为它会同时吞掉编程错误、供应商字段变化和真正的网络故障。也不要把 Authorization、完整 prompt 或个人数据写进错误文本；记录 request ID、状态码、字段摘要和耗时通常已经足够。
+
+### 4. 客户端生命周期与连接复用
+
+在循环内为每一条样本新建 `requests.Session`，会失去连接池并增加 TCP/TLS 建连成本。长生命周期服务可以在启动时创建 Session，在关闭钩子中关闭；短脚本则用一个 `with` 作用域覆盖整批任务。复用连接不等于允许无限并发：embedding 服务可能限制 token 数，聊天服务可能限制并发请求，GPU 推理可能受显存上限约束。连接池、semaphore 和速率限制要一起设计。
+
+测试时不要让每个单元测试都访问真实模型服务。注入 fake session，记录 URL、JSON、timeout 和调用次数，分别模拟超时、503、坏 JSON、缺字段与合法响应；再用少量集成测试确认真实供应商的认证和 schema。这样运行验证能告诉你到底是自己的映射错误，还是外部协议真的变了。
+
+## 运行验证：用输入、状态和输出定位层次
+
+先用固定 payload 验证纯解析逻辑，再用本地 fake server 验证 HTTP 层。示例输入是 `{"label":"positive","score":0.91}`，预期 Python 输出是 `{"label": "positive", "score": 0.91}`；输入 `{"label":"positive"}` 应得到 `InvalidUpstreamResponse`，而不是返回一个带默认分数的结果。运行命令可以是 `python demo_classifier.py`，输出应明确列出 `status=200 parsed=1` 和失败类型。
+
+若使用真实服务，记录开始时间、结束时间、状态码、响应字节数和脱敏 request ID。先用最小请求确认 DNS/TLS 和认证，再增加完整 prompt、图片或批量 token。一个稳定的验证顺序是：1）直接运行 schema 解析测试；2）用 fake server 返回 200、429、503 和坏 JSON；3）再做一次真实服务集成测试。这样不会把所有问题都归咎于“模型不稳定”。
+
+## 常见错误与排错路径
+
+最常见的错误有四类。把 `response.json` 当属性而没有调用，会把方法对象传下去；只检查 `raise_for_status()`，会漏掉 200 但字段缺失；把 `timeout=5` 当成包含多次重试的总预算，会让上游请求拖过用户请求生命周期；在错误日志中打印完整 response，会泄露 prompt 或凭据。
+
+排错时按层走：先确认 URL 是否来自可信配置且没有多余空格；再确认连接和读取耗时是否分开；然后打印状态码和 `Content-Type`，不打印密钥；最后对响应做 `type(payload)`、必需键和数值范围检查。若 200 后解析失败，保存脱敏后的字段集合，例如 `keys=["label","score"]`，再对照供应商版本。若请求偶发重复，检查重试是否覆盖了非幂等 POST，以及客户端断开时服务端是否可能已经完成。
+
+## 练习：包一层可靠的分类客户端
+
+任务是实现 `ClassifierClient.classify(text)`：发送 `{"text": text}`，连接超时 2 秒、读取超时 5 秒，对非 2xx 抛出可分类异常，并验证返回的 `label` 是非空字符串、`score` 是 0 到 1 之间的有限数。调用者不应接触 requests 或 urllib 的具体异常类型。请为 timeout、503、422、无 label、score 越界和合法响应各写一个测试。
+
+<KeyIdea title="服务边界要翻译失败语义">
+  <p>网络库的异常是实现细节，业务层需要知道是否可重试、是否应返回用户错误，以及响应是否可信。边界越早分类，AI 推理服务越容易运维和审计。</p>
+</KeyIdea>
+
+<Exercise
+  title="HTTP 客户端与服务边界练习"
+  prompt="设计 classify(text) 的异常映射和返回类型；为 timeout、503、422、无 label、score 越界和合法响应各写一个测试场景。"
+  hint="依赖注入 session；先翻译网络/HTTP 错误，再检查 dict 字段、有限性和 score 范围。"
+  solution={`class InvalidUpstreamResponse(ValueError):
+    pass
+
+def parse_prediction(payload):
+    if not isinstance(payload, dict):
+        raise InvalidUpstreamResponse("response must be an object")
+    label = payload.get("label")
+    score = payload.get("score")
+    if not isinstance(label, str) or not label.strip():
+        raise InvalidUpstreamResponse("label is required")
+    if (not isinstance(score, (int, float)) or isinstance(score, bool)
+            or not 0 <= float(score) <= 1):
+        raise InvalidUpstreamResponse("score must be between 0 and 1")
+    return {"label": label, "score": float(score)}`}
+/>
+
+<SolutionReveal>
+  <p>完整答案的边界是：fake session 验证发送的 JSON、timeout 和异常映射，纯函数验证 label/score，最后才用真实服务做集成验证。这样单元测试快速稳定，集成测试专门回答“网络、认证和供应商 schema 真的兼容吗”。</p>
+</SolutionReveal>
+
+## 与 AI 数据管线和推理服务连接
+
+在数据准备阶段，HTTP 客户端可以读取标注服务、特征服务或 embedding API；在在线推理阶段，它又可能调用分类器、重排器或大模型。两处都应保留输入版本、request ID、模型版本和结果 schema。对批处理，按 token 或字节数切批，并把失败样本写入可重放的隔离队列；对在线服务，把上游失败映射成明确的 502/504，避免把“上游不可用”伪装成模型低置信度。
+
+AI 服务连接的关键不是让请求代码更短，而是让每个结果都能回答：请求发给谁、使用了哪一版输入、返回是否经过校验、失败能否安全重试。这个 HTTP 边界会被后面的 CLI 配置、logging 上下文、asyncio 取消和 SQL 数据读取共同复用。
+
+## 小结
+
+可靠的 Python HTTP 客户端 = 明确的 urllib/requests 选择 + 连接与读取超时 + 状态码判断 + JSON/字段校验 + 可分类异常 + 可释放且受限的客户端资源。运行验证要从 fake 输入和固定输出开始，再逐步接入真实 AI 服务；只有这样，网络失败、业务拒绝和坏数据才不会混成一个难以调试的 `None`。

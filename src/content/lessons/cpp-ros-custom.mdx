@@ -1,0 +1,150 @@
+---
+id: cpp-ros-custom
+slug: ros2-custom-interfaces-and-contracts
+title: "ROS 2 自定义接口与消息契约"
+summary: "从标准消息进入自定义 msg、srv 和 action，理解接口包与运行时包的边界。"
+track: cpp
+order: 30
+durationMinutes: 20
+concepts: [ros2, interfaces, messages, contracts]
+prerequisites: [cpp-ros-bag]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## ROS 2 自定义接口与消息契约
+
+TypeScript interface、JSON Schema 和 protobuf 都在解决同一个工程问题：多个组件如何对字段、单位、时间和失败语义达成稳定约定。ROS 2 的 `.msg`、`.srv` 和 `.action` 会生成 C++/Python 类型支持，但生成代码不会替你决定兼容性。接口包应尽量稳定，业务包才能独立替换算法和设备。
+
+## 学习目标
+
+- 能把 JS/TS 的 TypeScript interface 字段约束迁移成带单位、时间、坐标系和失败语义的 ROS 2 接口。
+- 能创建并安装 `msg`、`srv`、`action`，理解接口包与业务/驱动包的依赖边界。
+- 能用 CLI、固定样例和旧 bag 检查接口兼容性，而不是只依赖 C++ 编译通过。
+
+### 先把数据语义写进接口
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`interface SensorReading {
+  id: string;
+  value: number; // meters, finite
+  stampNs: bigint;
+}`}
+  targetLabel="ROS 2 interface"
+  targetLanguage="cpp"
+  target={`# msg/SensorReading.msg
+string sensor_id
+float64 range_m
+builtin_interfaces/Time stamp
+uint8 VALID=0`}
+/>
+
+字段名和类型是可生成的 API，单位和范围还要放进文档、注释或验证节点。`float64` 不能自动阻止 NaN，`Time` 不能自动保证设备时钟同步；接收方仍要校验。消息只应携带描述数据所需的字段，错误原因、确认和取消属于 service/action 的契约，不要把任意 JSON 字符串塞进每条消息。
+
+### msg、srv 和 action 各自表达什么
+
+```text
+# msg/SensorReading.msg
+string sensor_id
+float64 range_m
+builtin_interfaces/Time stamp
+
+# srv/ValidateReading.srv
+SensorReading reading
+---
+bool accepted
+uint16 error_code
+string reason
+
+# action/Calibrate.action
+string sensor_id
+---
+bool success
+string reason
+---
+float32 progress
+```
+
+msg 适合流，srv 适合快速请求/响应，action 适合带反馈和取消的长任务。接口包 CMake 通常调用 `rosidl_generate_interfaces(${PROJECT_NAME} ... DEPENDENCIES builtin_interfaces)`，并在 manifest 声明生成器和运行依赖。运行包只依赖接口包，不应复制生成的头文件到自己的源码。
+
+### 版本演进要谨慎
+
+新增可选语义时，旧节点是否能忽略字段取决于 ROS 2 类型支持和部署方式，不能照搬 JSON 的宽松想象。修改字段类型、单位或含义通常是破坏性变更，应新建接口名/版本并安排迁移。删除字段前搜索所有 publisher、subscriber、bag 和测试；接口包变更后同时重建依赖工作区。
+
+### 常见编译、链接、运行时错误
+
+生成头文件找不到，检查接口包是否先构建、`rosidl_default_generators` 是否声明、目标是否 source 了正确 overlay。链接缺少 type support，检查 `rosidl_target_interfaces`/ament 依赖和 ROS 2 发行版。运行时字段值不合理时，先检查单位、默认零值、NaN 和时间来源；旧节点收到了消息却行为错误，优先比对接口版本和实际 topic 类型，不要只看 topic 名。
+
+<KeyIdea title="接口包是跨节点的长期 API">
+  <p>字段类型、单位、时间、错误码和版本规则都属于消息契约。接口包稳定，业务实现才能在不改通信边界的情况下替换。</p>
+</KeyIdea>
+
+## 迁移练习
+
+为传感器处理器定义 `SensorReading.msg`，包含 ID、米、采集时间和质量字段；再设计 `ValidateReading.srv` 的错误返回及一个需要持续反馈的校准 action。更新一个字段前，列出 publisher、subscriber、bag 和测试的兼容影响。
+
+<Exercise
+  title="设计一组可演进的 ROS 2 接口"
+  prompt="写出 msg、srv、action 的字段和单位；说明无效读数、长校准任务、取消与版本升级如何表达。"
+  hint="流数据放 msg，短校验放 srv，长校准放 action；NaN/越界需在处理节点显式验证。"
+  solution={`SensorReading 可含 sensor_id、range_m、stamp、quality；ValidateReading.srv 返回 accepted/error_code/reason；Calibrate.action 用 goal sensor_id、result success/reason、feedback progress。若语义或单位改变，优先新增版本接口并同步更新 rosbag、节点和测试。`}
+/>
+
+### 用接口文件表达单位和时间
+
+一个消息字段不仅有名字，还有单位、坐标系、时间来源和是否允许缺失。比如 `float64 distance_m` 比 `float64 value` 更不容易被不同驱动误用；`builtin_interfaces/Time stamp` 应说明是传感器采样时间还是 ROS 接收时间。
+
+```text
+# msg/RangeReading.msg
+std_msgs/Header header
+string sensor_id
+float64 distance_m
+uint8 QUALITY_OK=0
+uint8 QUALITY_STALE=1
+uint8 quality
+```
+
+生成接口后用 `ros2 interface show lidar_msgs/msg/RangeReading` 检查安装结果。不要只看 C++ 头文件能否 include；还要确认下游节点读的是同一包、同一版本和同一语义。
+
+### srv 和 action 应保持职责清晰
+
+`.srv` 的 request/response 适合快速查询或一次配置，`.action` 要把 goal、feedback 和 result 分成可观察状态。自定义接口不要把任意 JSON 字符串塞进一个字段来逃避设计，否则 rosbag、CLI 和类型检查都会失去价值。
+
+```text
+# srv/SetSensorMode.srv
+string mode
+---
+bool accepted
+string reason
+
+# action/Calibrate.action
+string sensor_id
+---
+bool success
+string reason
+---
+float32 progress
+```
+
+用 `ros2 service call` 和 `ros2 action send_goal -f` 做最小端到端验证，分别记录非法 mode、取消 calibration 和成功完成的结果。
+
+### 接口包与实现包的构建边界
+
+接口包应只放 `.msg/.srv/.action` 和生成配置，业务包再依赖它。`rosidl_generate_interfaces` 的依赖、`ament_export_dependencies` 和下游 `find_package` 缺一项，都可能造成“本机构建过、干净工作区构建失败”。先在 clean build 目录中 `colcon build --packages-up-to sensor_driver`，再运行 `ros2 pkg prefix lidar_msgs` 验证安装空间。
+
+### 兼容性和消息生命周期
+
+新增字段通常比删除或改变字段类型更容易兼容，但消费者仍要处理默认值和未知质量码。高频消息通过 DDS 发送后，回调中的共享指针不应越过异步边界；把接口消息转换为领域值对象，明确深拷贝发生在哪里。若消息包含大图像或点云，应在接口设计阶段讨论带宽、QoS、loaned message 和生命周期，而不是上线后才发现复制成本。
+
+### 契约测试和演进排错
+
+至少保留一份固定消息样例，检查字段单位、`frame_id`、时间戳和边界值；用旧 bag 回放验证新消费者仍能处理。出现 `InvalidTopicName`、类型不匹配或反序列化失败时，依次查 topic 名称、`ros2 topic type`、接口安装路径、overlay 顺序和 `AMENT_PREFIX_PATH`。接口包的版本变更要和 bag、驱动、算法的发布说明一起记录。
+
+<SolutionReveal>
+  <p>自定义接口的核心是把隐含的字段语义和失败状态变成跨语言可检查的契约。下一节会讨论这些类型在同一进程内组合时如何减少复制。</p>
+</SolutionReveal>

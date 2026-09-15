@@ -1,0 +1,82 @@
+---
+id: common-cli
+slug: cli-project-structure-and-config
+title: "CLI、项目结构与配置"
+summary: "从 npm scripts 出发，掌握可测试的命令行入口、配置和目录组织。"
+track: common
+order: 7
+durationMinutes: 12
+concepts: [cli, project structure, configuration, testing]
+prerequisites: [common-errors]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 从一个命令找到整个项目
+
+JS/TS 项目常用 `npm run dev`、`npm test` 和 `npm run build` 作为入口。Python 项目会把命令放在模块、脚本或项目配置中，C++ 项目则由 CMake target 和生成的可执行文件组成。迁移 CLI 时，最重要的是保持“解析字符串参数、构造配置、调用核心逻辑、报告结果”的顺序，而不是把 Node 的参数库逐字换成另一个库。
+
+无论语言怎样，用户真正需要的是一条清楚的启动路径：输入参数从哪里来、配置在哪里、日志输出到哪里、失败时退出码是什么。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="json"
+  source={`{\n  "scripts": {\n    "dev": "node src/cli.js --watch",\n    "test": "vitest run"\n  }\n}`}
+  targetLabel="Python"
+  targetLanguage="bash"
+  target={`python -m app.cli --input data/raw.json\npython -m pytest\npython -m app.cli --help`}
+/> 
+
+### 推荐的目录职责
+
+- `cli` 或 `cmd`：解析参数，组装依赖，不承载全部业务逻辑。
+- `domain` 或 `core`：纯业务规则，尽量可以脱离网络和文件测试。
+- `adapters` 或 `io`：文件、HTTP、传感器和模型服务等外部边界。
+- `tests`：用小数据验证每个边界，入口测试只检查组合关系。
+
+```python
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    try:
+        rows = read_rows(args.input)
+        result = normalize(rows, strict=args.strict)
+        write_rows(args.output, result)
+    except ValueError as exc:
+        print(f"invalid input: {exc}", file=sys.stderr)
+        return 2
+    return 0
+```
+
+<KeyIdea title="入口函数应该薄，核心函数应该可测">
+  <p>命令行入口负责把字符串变成类型化参数，然后调用核心函数。这样同一套逻辑既可以被 CLI 调用，也可以被测试、服务接口或机器人节点复用。</p>
+</KeyIdea>
+
+## 配置优先级
+
+### 配置优先级与可测试入口
+
+配置经常来自默认值、配置文件、环境变量和命令行参数。先写出优先级，例如“默认值 < 文件 < 环境变量 < CLI”，然后在一个 `load_config` 函数中合并并校验。入口函数接收 `argv` 参数而不是直接读取全局 `sys.argv`，测试就可以传入固定参数；C++ 的 `main(int argc, char** argv)` 也应尽快转换成类型明确的 options 对象。
+
+AI 项目尤其容易把模型路径、服务地址和超时散落在代码里。机器人项目还会增加设备名称、坐标系、频率和安全阈值。把配置集中起来，后续迁移会轻松很多。
+
+### 配置来源要可解释
+
+启动时可以打印 `config_source=env timeout_ms=5000` 这类安全摘要，但不要打印 API key。AI 项目常需要模型路径、服务地址和批大小；机器人项目还会增加设备名、坐标系、频率和安全阈值。集中配置能让同一份核心逻辑被 CLI、HTTP 服务和机器人节点复用。
+
+### 常见错误与排错思路
+
+一个常见错误是 CLI 解析器里直接打开文件、调用模型并打印结果，导致参数错误、IO 错误和业务错误无法区分。排错时先运行 `--help` 验证参数名称，再传入不存在文件、非法数字和空输入，观察退出码是否稳定；检查 stdout 是否仍只输出机器可读结果，诊断信息是否进入 stderr。若 npm 脚本在 CI 失败，展开脚本实际命令，确认工作目录和相对路径。
+
+<Exercise
+  title="画出一个 CLI 的启动路径"
+  prompt="设计一个 normalize-data 命令：它接收输入文件、输出目录和严格模式三个参数，并写出参数错误、输入错误、成功三种退出语义。"
+  hint="先写 cli.parse_args，再调用 domain.normalize，最后由 io 写文件；诊断输出到 stderr。"
+  solution={`main(argv) 解析参数并构造 Config；读取失败或格式错误返回 2，业务校验失败返回 3，成功写出文件返回 0。CLI 只组装 cli.parse_args、domain.normalize 和 io.write_rows，不在入口实现清洗规则。`}
+/> 
+
+<SolutionReveal>
+  <p>如果调用顺序可以用五六个函数名说明，项目边界通常已经足够清晰。薄入口让同一业务逻辑可以被测试、服务接口或机器人节点复用。</p>
+</SolutionReveal>

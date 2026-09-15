@@ -1,0 +1,88 @@
+---
+id: common-boundaries
+slug: api-boundaries-and-contracts
+title: "API 边界与契约"
+summary: "用输入、输出、不变量和失败语义定义稳定接口，而不是只传一堆对象。"
+track: common
+order: 11
+durationMinutes: 14
+concepts: [api, contracts, invariants]
+prerequisites: [common-iteration]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## API 边界与契约
+
+TS `interface` 能描述字段，却不会自动保证运行时输入可信。Python 和 C++ 同样需要在边界校验数据，并决定错误通过异常、返回值还是状态对象表达。一个 API 契约不仅是字段表，还要写清必填字段、单位、范围、默认值、幂等性、超时和失败语义。这样 Web、Python 推理服务和 C++ 机器人节点才能独立演进。
+
+### 接口首先要说明失败怎么发生
+
+下面这段代码只保留同一个意图，重点观察输入边界、数据流和失败语义，而不是逐字符翻译。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`type Prediction = { label: string; score: number };
+function accept(prediction: Prediction) {
+  if (prediction.score < 0) throw new Error("invalid");
+}`}
+  targetLabel="Python / C++"
+  targetLanguage="text"
+  target={`# Python
+def accept(prediction: Prediction) -> None:
+    if not 0 <= prediction.score <= 1:
+        raise ValueError("score must be in [0, 1]")
+
+// C++
+bool accept(const Prediction& prediction) {
+  return prediction.score >= 0.0 && prediction.score <= 1.0;
+}`}
+/>
+
+### 从类型提示到运行时契约
+
+类型检查和运行时校验解决的是不同问题：前者帮助开发者，后者保护系统免受网络、文件和设备输入影响。解析 JSON 时应先判断字段存在和基本类型，再检查业务范围；不要让内部函数每次都猜测 `score` 是否可能为字符串。对时间、角度、坐标系和置信度的单位写进契约，尤其要避免“数字看起来一样”造成静默错误。
+
+```python
+def parse_prediction(raw: dict) -> tuple[str, float]:
+    label = raw.get("label")
+    score = raw.get("score")
+    if not isinstance(label, str) or not label:
+        raise ValueError("label is required")
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        raise ValueError("score must be numeric")
+    if not 0.0 <= float(score) <= 1.0:
+        raise ValueError("score must be in [0, 1]")
+    return label, float(score)
+```
+
+### 设计稳定的失败语义
+
+区分客户端输入错误、认证失败、限流、依赖不可用和服务内部错误。HTTP 可以用状态码与错误码，CLI 可以用退出码，C++ 库可以返回 `expected` 或状态对象；重要的是调用方能稳定判断是否重试。契约测试应锁住字段名、范围和错误码，而不是只断言一段自然语言消息。
+
+### 常见错误与排错思路
+
+常见错误是只在 TypeScript 编译期写 `Prediction`，然后直接信任 `JSON.parse`；另一个是把所有异常都返回 500，让调用方无法修复输入。排错时保存请求 id、schema 版本和失败字段名，比较进入边界时的原始类型与转换后的内部值；若分布式组件行为不一致，先对照契约和实际 payload，再看算法。
+
+<KeyIdea title="接口首先要说明失败怎么发生">
+  <p>跨语言迁移的第一项工程能力，是把隐含假设变成可以测试的接口契约，并让每种失败都有稳定的处理动作。</p>
+</KeyIdea>
+
+## 迁移练习
+
+请完成：为一个 AI 置信度接口补充范围校验、错误信息和调用方处理方式，覆盖字段缺失、score 非数字、超时和服务端 5xx 四种情况。
+
+<Exercise
+  title="API 边界与契约练习"
+  prompt="为一个 AI 置信度接口补充范围校验、错误信息和调用方处理方式，覆盖字段缺失、score 非数字、超时和服务端 5xx 四种情况。"
+  hint="把 score 的合法区间和缺失字段分别作为契约写出来，并区分可重试与不可重试。"
+  solution={`缺失字段和非数字返回 invalid-input，不重试；score 超出 0..1 也拒绝并指出字段；连接超时返回 dependency-timeout，可按上限重试；5xx 返回 dependency-unavailable，仅对幂等请求退避重试。`}
+/>
+
+<SolutionReveal>
+  <p>跨语言迁移的第一项工程能力，是把隐含假设变成可以测试的接口契约。契约越具体，内部算法越能专注于业务，调用方也越容易在 Python 与 C++ 之间互操作。</p>
+</SolutionReveal>

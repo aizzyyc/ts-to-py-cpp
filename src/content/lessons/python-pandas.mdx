@@ -1,0 +1,237 @@
+---
+id: python-pandas
+slug: pandas-dataframes-and-cleaning
+title: "pandas DataFrame 与数据清洗"
+summary: "从 JavaScript 数组对象进入表格数据、缺失值、分组和合并操作。"
+track: python
+order: 17
+durationMinutes: 18
+concepts: [pandas, dataframe, cleaning]
+prerequisites: [python-data]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+本节完成后，你能够把一批 AI 事件从对象数组整理成可审核的 pandas 表格。具体要会：
+
+- 解释 DataFrame 的行、列、索引、shape 和 dtype，而不是把它当成更大的 list。
+- 设计缺失值、非法值、重复键和时间字段的处理策略。
+- 使用 groupby 和 merge 生成特征，并验证行数、键关系和数据是否泄漏。
+- 用输出统计和小 fixture 验证清洗结果，沿着可重复的排错路径定位问题。
+
+## 从 JS/TS 迁移的心智模型
+
+在 JavaScript/TypeScript 中，rows.filter(...).map(...) 通常把每条记录当作独立对象。pandas 更像一张带标签的列式表：同一列有共同 dtype，运算默认按列向量化，Series 还会按索引对齐。这个差异对 AI 很关键：一个传感器事件表最终会变成 batch 与 features 的输入，任何错误的索引或重复连接都可能改变训练样本，而模型本身未必报错。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const valid = events
+  .filter(event => Number.isFinite(Number(event.value)))
+  .map(event => ({ ...event, value: Number(event.value) }));`}
+  targetLabel="Python / pandas"
+  targetLanguage="python"
+  target={`frame = pd.DataFrame.from_records(events)
+frame["value"] = pd.to_numeric(frame["value"], errors="coerce")
+valid = frame.loc[frame["value"].notna()].copy().`}
+/>
+
+<KeyIdea title="先写表格契约，再写清洗语句">
+  <p>每个字段都要有名字、dtype、单位、是否允许缺失和唯一性说明。DataFrame 的便利不能替代这些决定。</p>
+</KeyIdea>
+
+## DataFrame、索引与列类型
+
+DataFrame.shape 是 rows、columns；frame.columns 是列名集合；frame.dtypes 是每列的运行时类型。AI 特征表常见 id 为 string、timestamp 为 UTC 时间、数值列为 float32、标签为 category 或字符串。不要因为某一列看起来是数字就让 ID 被推断成整数；丢失前导零会让两个设备被错误合并。
+
+索引不是天然主键。默认的 RangeIndex 只是当前行的位置，过滤后可能留下 0、3、7。需要交给下游的稳定身份应该放在显式 event_id 列中，最终输出前使用 reset_index(drop=True)；只有当按时间窗口取数确实需要时，才把时间设为索引。
+
+### 示例一：读取后立即检查契约
+
+```python
+import pandas as pd
+
+events = [
+    {"event_id": "e-01", "sensor_id": "s1", "timestamp": "2026-01-01T10:00:00Z", "value": "0.8", "label": "wake"},
+    {"event_id": "e-02", "sensor_id": "s1", "timestamp": "2026-01-01T10:01:00Z", "value": "bad", "label": "noise"},
+    {"event_id": "e-03", "sensor_id": "s2", "timestamp": None, "value": 0.2, "label": "wake"},
+]
+frame = pd.DataFrame.from_records(events)
+frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
+frame["value"] = pd.to_numeric(frame["value"], errors="coerce")
+
+print(frame.shape)
+print(frame.dtypes[["event_id", "timestamp", "value"]])
+print(frame[["timestamp", "value"]].isna().sum().to_dict())
+```
+
+预期输出会包含 (3, 5)，event_id 仍是字符串，timestamp 和 value 各有一个缺失。这里的 errors="coerce" 是有意把坏输入变成可计数的缺失，不是把错误藏起来；接下来必须决定这些行是丢弃、修复还是进入人工复核。
+
+## 缺失值、过滤与不可变边界
+
+isna、notna 和 fillna 表达的是不同的业务策略。对传感器值，缺失可能代表设备断线，不应随便填成均值；对一个不会参与模型的备注列，填空字符串可能合理。dropna(subset=[...]) 只对关键列执行，避免因为一个可选字段为空而删除整条样本。所有转换前先 frame = frame.copy()，这样调用者能保留原始证据，重试时不会得到已经被改写的数据。
+
+### 示例二：形成稳定的清洗函数
+
+```python
+def clean_events(frame: pd.DataFrame) -> pd.DataFrame:
+    required = {"event_id", "sensor_id", "timestamp", "value", "label"}
+    missing_columns = required - set(frame.columns)
+    if missing_columns:
+        raise ValueError(f"missing columns: {sorted(missing_columns)}")
+
+    work = frame.copy()
+    work["timestamp"] = pd.to_datetime(work["timestamp"], utc=True, errors="coerce")
+    work["value"] = pd.to_numeric(work["value"], errors="coerce")
+    valid = (
+        work["event_id"].notna()
+        & work["sensor_id"].notna()
+        & work["timestamp"].notna()
+        & work["value"].between(0, 1)
+        & work["label"].notna()
+    )
+    cleaned = work.loc[valid, list(required)].copy()
+    cleaned = cleaned.drop_duplicates("event_id", keep="last")
+    return cleaned.sort_values(["timestamp", "event_id"], kind="stable").reset_index(drop=True)
+```
+
+这里的输出 shape 应满足 cleaned.shape[1] == 5，并且每个 event_id 唯一。若业务允许超出 0–1 的原始传感器量，应先换成正确单位或范围，而不是照抄这个条件。函数应返回新表，调用者可以同时保存 len(frame)、len(cleaned) 和每个丢弃原因。
+
+## groupby、merge 与数据泄漏
+
+groupby 把多行事件压缩成一行特征，例如按 sensor_id 计算均值、最大值和事件数。聚合前要明确窗口：如果把整个月的平均值放进一条早期样本，未来数据就泄漏进过去。训练、验证、测试切分后，按训练集拟合的统计量只能应用到验证和测试，不能用全量表先算均值再切分。
+
+merge 是关系连接，不是“把两个对象拼起来”。连接前检查键是否唯一、单位是否一致、时间是否同一时区；连接后比较行数、空值和重复键。validate="many_to_one" 能防止右表本应唯一却意外一对多。若设备元数据一对多地连接到事件，训练表行数膨胀，模型可能重复看到某些设备。
+
+### 示例三：带关系验证的聚合和合并
+
+```python
+summary = (
+    clean_events(frame)
+    .groupby("sensor_id", as_index=False, dropna=False)
+    .agg(
+        event_count=("event_id", "size"),
+        value_mean=("value", "mean"),
+        value_max=("value", "max"),
+    )
+)
+
+devices = pd.DataFrame(
+    {"sensor_id": ["s1", "s2"], "site": ["lab-a", "lab-b"]}
+).drop_duplicates("sensor_id")
+
+features = summary.merge(
+    devices,
+    on="sensor_id",
+    how="left",
+    validate="one_to_one",
+    indicator=True,
+)
+assert features["_merge"].eq("both").all()
+assert len(features) == len(summary)
+print(features[["sensor_id", "event_count", "site"]].to_dict("records"))
+```
+
+若 validate 报错，优先查看 devices["sensor_id"].duplicated(keep=False)，不要先删重复行。重复可能表示真实设备版本，需要重新定义键。若聚合结果的 event_count 和原始行数对不上，检查是否在过滤前后使用了不同时间窗口。
+
+## 运行、输出与验证
+
+用一个包含非法 value、空 timestamp、重复 event_id、未知 sensor_id 的 fixture 运行清洗。验证不只看“程序没有异常”，还要打印：
+
+```python
+cleaned = clean_events(frame)
+print({
+    "input_rows": len(frame),
+    "output_rows": len(cleaned),
+    "columns": cleaned.columns.tolist(),
+    "dtypes": {name: str(dtype) for name, dtype in cleaned.dtypes.items()},
+    "duplicate_ids": int(cleaned["event_id"].duplicated().sum()),
+    "missing": cleaned.isna().sum().to_dict(),
+})
+assert cleaned["event_id"].is_unique
+assert cleaned["timestamp"].notna().all()
+assert cleaned["value"].between(0, 1).all()
+```
+
+这些结果就是可审核的运行证据：输入 4 行、输出 1 行并不一定是 bug，但必须能解释每一行为什么被保留或拒绝。批量数据进入模型前，再把 cleaned.shape 与下游期望的 batch、features 对照，避免表格列数变化到训练阶段才暴露。
+
+## 常见错误、排错与调试
+
+- KeyError：打印 frame.columns.tolist()，检查拼写、大小写和读取文件的分隔符；不要用 frame.get() 把必需列缺失静默成空。
+- SettingWithCopyWarning：回到产生子表的地方，显式 copy，写入时使用 loc。
+- merge 后行数突然变多：统计左右键重复数，临时加 validate 和 indicator，确认连接基数与预期一致。
+- 平均值异常高：检查单位、时区、过滤窗口和是否把验证/测试未来记录聚合进训练特征；这属于数据泄漏排错，不是模型调参。
+- 内存飙升：查看 frame.memory_usage(deep=True)，只读需要的列，分块读取文件；不要在循环中逐行 concat。
+- 结果不可复现：固定排序键和 stable 排序，记录输入文件哈希、pandas 版本、清洗参数和数据版本。
+
+## 练习与任务
+
+实现 prepare_features(frame, metadata)：清洗事件、按 sensor_id 聚合 value_mean 与 event_count，再合并唯一的设备元数据。要求输入不被修改；缺少列、非法时间、重复元数据键都要给出可读错误；结果必须有稳定排序、无缺失 site，并返回处理统计。
+
+<Exercise
+  title="pandas AI 事件表练习"
+  prompt="实现 prepare_features(frame, metadata)，返回 (features, report)。report 至少包含 input_rows、kept_rows、dropped_rows、duplicate_event_ids、unmatched_sensors；用 groupby 和 merge 生成可供模型使用的特征。"
+  hint="先 copy 并转换 timestamp/value；用 duplicated 统计重复；merge 时设置 validate='one_to_one' 和 indicator=True。"
+  solution={`clean = clean_events(frame)
+summary = (clean.groupby("sensor_id", as_index=False)
+           .agg(value_mean=("value", "mean"), event_count=("event_id", "size")))
+features = summary.merge(metadata, on="sensor_id", how="left",
+                         validate="one_to_one", indicator=True)
+report = {"input_rows": len(frame), "kept_rows": len(clean),
+          "dropped_rows": len(frame) - len(clean),
+          "unmatched_sensors": int((features["_merge"] != "both").sum())}
+return features.drop(columns="_merge"), report`}
+/>
+
+### 完整答案
+
+一个可交付的答案还应明确元数据未匹配时是失败还是允许缺失。下面选择严格失败，避免把未知站点编码成一个看似合法的类别：
+
+```python
+def prepare_features(frame: pd.DataFrame, metadata: pd.DataFrame):
+    cleaned = clean_events(frame)
+    if metadata["sensor_id"].duplicated().any():
+        raise ValueError("metadata sensor_id must be unique")
+
+    summary = (
+        cleaned.groupby("sensor_id", as_index=False)
+        .agg(value_mean=("value", "mean"), event_count=("event_id", "size"))
+    )
+    merged = summary.merge(
+        metadata[["sensor_id", "site"]],
+        on="sensor_id",
+        how="left",
+        validate="one_to_one",
+        indicator=True,
+    )
+    unmatched = int((merged["_merge"] != "both").sum())
+    if unmatched:
+        raise ValueError(f"metadata missing for {unmatched} sensors")
+    features = merged.drop(columns="_merge").sort_values("sensor_id").reset_index(drop=True)
+    report = {
+        "input_rows": int(len(frame)),
+        "kept_rows": int(len(cleaned)),
+        "dropped_rows": int(len(frame) - len(cleaned)),
+        "unmatched_sensors": unmatched,
+    }
+    return features, report
+```
+
+用正常、重复、缺列和元数据不完整四组输入运行，核对异常类型、输出 shape、dtype、排序和 report。这样 pandas 的索引、缺失、分组和合并知识才真正变成 AI 数据准备的可靠边界。
+
+<SolutionReveal>
+  <p>完成后把 report 与输入数据版本一起保存。下一次模型指标变化时，你才能区分是模型变了，还是样本数量、设备覆盖和清洗规则变了。</p>
+</SolutionReveal>
+
+## 与同一 AI 项目主线的连接
+
+这张特征表会流向下一节的 NumPy 数组，再进入 scikit-learn 或 PyTorch。pandas 负责记录是否可信、字段关系是否正确，不负责替模型猜测缺失含义。切分数据后重新拟合统计量，能阻断泄漏；保留 event_id、sensor_id、timestamp 和 report，则能在评估失败时回溯到原始事件。把这些输出作为数据版本的一部分，后面的训练、checkpoint、推理服务和漂移监控才有共同的证据链。
+
+## 小结
+
+DataFrame 的核心不是语法糖，而是带标签的二维数据契约：先检查 shape、列名和 dtype，再处理缺失；先确认 groupby 的时间窗口，再生成特征；先验证 merge 的基数，再把元数据交给模型。每个清洗动作都要留下可观察的行数、原因和版本，才能从 JS/TS 的脚本式转换走向可审核的 AI 管线。

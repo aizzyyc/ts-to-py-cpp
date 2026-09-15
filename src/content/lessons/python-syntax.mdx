@@ -1,0 +1,206 @@
+---
+id: python-syntax
+slug: python-syntax-and-data-model
+title: "Python 语法与数据模型"
+summary: "用 JS/TS 的已知概念快速掌握 Python 的缩进、可变性和常用容器。"
+track: python
+order: 1
+durationMinutes: 10
+concepts: [syntax, mutability, dict, list]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+完成本节后，你应该能从命令行确认 Python 解释器和版本，写出一个可以运行的 `.py` 脚本；能区分名称绑定、对象修改和重新绑定；能选择数字、字符串、`list`、`tuple`、`dict`、`set` 来表达数据；能用索引、切片和明确的拷贝策略处理一条 AI 数据记录。
+
+## 从 JS/TS 迁移的心智模型
+
+JavaScript/TypeScript 通常从 `node script.ts`、`package.json` 和编译器开始理解运行时。Python 更直接：解释器读取源文件，按缩进构造代码块并执行。`python --version` 看到的是当前命令实际找到的解释器；一个电脑上可以同时存在多个版本，所以不要把“编辑器显示的版本”当成“脚本运行的版本”。在项目里优先用 `python -m pip`，它会把 pip 绑定到当前解释器，而不是某个碰巧排在 PATH 前面的 pip。
+
+Python 的变量更准确地叫“名称”。`count = 3` 是让名称 `count` 绑定整数对象；`count = "3"` 可以重新绑定到字符串，解释器不会因为第一次是数字就拒绝。这个模型和 JS/TS 的 `let` 很接近，但 Python 没有强制性的 `const` 绑定语法。名称重新绑定与对象原地修改必须分开判断：修改一条共享的样本列表，可能让后续模型输入悄悄变化。
+
+### 解释器、版本与脚本入口
+
+最小脚本就是一个以 `.py` 结尾的文本文件。保存下面内容为 `syntax_demo.py` 后，可以运行 `python syntax_demo.py`；在 Windows PowerShell 和 macOS/Linux 中命令主体相同。若项目明确要求 Python 3.10，就应在日志和 README 中记录它，不要用“最新版”作为可复现标准。
+
+```python
+import sys
+
+print("executable:", sys.executable)
+print("version:", sys.version_info.major, sys.version_info.minor)
+print("ready:", True)
+```
+
+运行结果会随机器路径和小版本变化，但形状应类似：
+
+```text
+executable: .../python.exe
+version: 3 11
+ready: True
+```
+
+### 数字、字符串、布尔值与 None
+
+Python 的整数不会因为超过 32 位就自动变成另一种语法类型，`float` 表示带小数的数，`bool` 只有 `True` 和 `False`，缺失值通常用 `None`。字符串是不可变对象，`strip()`、`lower()` 和切片都会返回新字符串；它们不会把原字符串在原地改掉。`None` 不是 JavaScript 的 `undefined` 或 `null` 的逐字翻译，而是 Python 代码中常见的“没有值”哨兵。比较缺失值要写 `value is None`，不要写 `value == 0`。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const raw = "  score=0  ";
+const score = 0;
+const missing: number | null = null;
+console.log(raw.trim(), score, missing === null);`}
+  targetLabel="Python"
+  targetLanguage="python"
+  target={`raw = "  score=0  "
+score = 0
+missing: float | None = None
+print(raw.strip(), score, missing is None)`}
+/>
+
+### 示例一：把配置值变成可观察的输出
+
+不要只在脑中判断类型，先写一个小输入并打印结果。这里的 `threshold` 是合法的零，不能因为它在条件中看起来是假就替换成默认值。`type(value).__name__` 是学习和排错时的轻量观察手段，服务日志中则应该记录脱敏后的字段和阶段。
+
+```python
+config = {"threshold": 0, "model": "tiny-v1", "note": "  中文标签  "}
+threshold = config.get("threshold")
+note = config.get("note", "")
+
+print("threshold:", threshold, type(threshold).__name__)
+print("note:", note.strip())
+print("missing:", config.get("timeout") is None)
+```
+
+输入是 `threshold=0` 和带空格的中文文本，输出应为：
+
+```text
+threshold: 0 int
+note: 中文标签
+missing: True
+```
+
+### list、tuple、dict 与 set 表达不同的数据形状
+
+`list` 是有序、可变的序列，适合待清洗的样本集合；`tuple` 也是有序序列，但常用来表达不会在当前阶段修改的坐标或快照；`dict` 以键查值，适合 JSON 对象和带字段名的记录；`set` 不保证顺序，适合去重和成员判断。JS/TS 中数组、对象和 `Set` 也有相似写法，但 Python 的容器操作、异常和可变性仍要重新学习。对外部 JSON，`row["id"]` 表示 id 是必需字段，`row.get("id")` 表示缺失可以由当前层处理。
+
+### 示例二：处理一条标注记录
+
+下面的输入模拟数据准备阶段收到的一条记录。先修改 `list` 中的分数，再把分数转换成 `tuple` 作为模型请求的只读快照；用 `set` 去掉重复标签，用 `dict` 保留字段名。
+
+```python
+record = {
+    "id": "sample-17",
+    "scores": [0.2, 0.4],
+    "labels": ["cat", "cat", "indoor"],
+}
+
+record["scores"].append(0.8)
+features = tuple(record["scores"])
+unique_labels = set(record["labels"])
+model_input = {"id": record["id"], "features": features}
+
+print(model_input)
+print(sorted(unique_labels))
+```
+
+一组可能的输出是：
+
+```text
+{'id': 'sample-17', 'features': (0.2, 0.4, 0.8)}
+['cat', 'indoor']
+```
+
+注意 set 的遍历顺序不应成为数据协议；展示时用 `sorted`，模型标签顺序则应由明确的列表或配置决定。
+
+### 切片不是复制所有层
+
+`items[start:stop:step]` 的 stop 不包含在结果里，和 JavaScript 的 `slice` 一样，`items[:3]` 取前三项，`items[-2:]` 取最后两项。切片会创建一个新的外层 `list`，但如果元素本身是字典或列表，内层对象仍然可能共享。`tuple(values)` 只把当前序列的外层固定为 tuple，也不会把里面的可变字典深度冻结。
+
+### 示例三：验证可变性和拷贝边界
+
+迁移时最容易误以为 `{...row}` 或 `row.copy()` 等价于深拷贝。下面分别演示浅拷贝、切片和 `deepcopy`；输出中的差异就是为什么原始样本和增强样本要有清晰的所有权。
+
+```python
+from copy import deepcopy
+
+original = {"id": "a1", "tokens": ["hello"]}
+shallow = original.copy()
+deep = deepcopy(original)
+
+shallow["tokens"].append("world")
+deep["tokens"].append("model")
+
+print("original:", original["tokens"])
+print("shallow:", shallow["tokens"])
+print("deep:", deep["tokens"])
+```
+
+运行结果：
+
+```text
+original: ['hello', 'world']
+shallow: ['hello', 'world']
+deep: ['hello', 'model']
+```
+
+### 运行验证：从输入到结果
+
+每次翻译一小段 JavaScript/TypeScript，都可以用三个检查点：输入是否如预期、输出的类型和数量是否如预期、原始对象是否被意外修改。命令行可以这样做：`python syntax_demo.py` 运行脚本，`python -c "print([1, 2][0:1])"` 运行极小验证。真实数据准备中，把这些 print 换成测试断言，但观察顺序不变。若切片输出为 `[]`，先检查 start/stop 和输入长度；若模型收到的特征数量变化，打印 `len(features)` 和 `type(features).__name__`。
+
+### 常见错误与排错路径
+
+- `IndentationError`：先统一为四个空格，显示不可见字符，并检查同一个代码块是否混用了 tab。Python 没有花括号来“补救”错误缩进。
+- `NameError`：确认名称拼写、赋值顺序和导入；不要把 TypeScript 的类型名写进 Python 表达式。
+- `KeyError`、`IndexError`：判断字段或索引是否真的属于输入契约。必需字段用 `row["id"]` 让错误尽早暴露，可选字段用 `.get` 并明确默认值。
+- `TypeError`：打印 `type(value)`，尤其检查 JSON 数字是否实际是字符串。类型提示不会自动把字符串转换成 `float`。
+- `is` 和 `==` 混用：`is` 判断是不是同一个对象，值相等用 `==`；`value is None` 是专门的身份判断例外。
+- 原始记录被改了：搜索所有 `append`、`update`、切片和 `.copy()`，再决定是返回新对象还是使用 `deepcopy`。不要为了消除一个副作用而复制巨大的数据集，先写出边界和内存成本。
+
+## 练习：生成不污染原始数据的干净事件
+
+给定 `events`，保留 `enabled` 为真且 `name` 是非空字符串的事件，为每个保留事件增加 `normalized_name`。缺少 `name` 的事件应跳过，原始 `events` 列表和其中的字典都不能增加字段。请先写一个最小输入，再记录保留数量和输出样例。
+
+<KeyIdea title="名称绑定不等于冻结对象">
+  <p>Python 的简洁来自清楚地表达数据形状和生命周期。进入模型前，先决定哪些对象可以修改、哪些对象必须作为快照传递；类型和拷贝策略都要在数据边界上说清楚。</p>
+</KeyIdea>
+
+### 提示
+
+先用 `isinstance(event.get("name"), str)` 排除错误类型，再调用 `strip()`。用 `{**event, "normalized_name": normalized}` 创建新字典；不要在循环里给 `event` 直接赋值。最后断言输入的第一个字典仍然没有 `normalized_name`。
+
+### 完整答案
+
+<Exercise
+  title="把 map/filter 翻译成清晰的 Python"
+  prompt="实现 normalize_events(events)：保留 enabled 为真且 name 为非空字符串的事件，返回带 normalized_name 的新字典列表，不能修改输入。"
+  hint="用 isinstance 检查 name，用 strip 得到规范值，用字典展开创建新记录。"
+  solution={`def normalize_events(events):
+    result = []
+    for event in events:
+        raw_name = event.get("name")
+        if not event.get("enabled") or not isinstance(raw_name, str):
+            continue
+        normalized = raw_name.strip()
+        if not normalized:
+            continue
+        result.append({**event, "normalized_name": normalized})
+    return result`}
+/>
+
+<SolutionReveal>
+  <p>可运行的检查应同时覆盖合法名称、空名称、缺字段和数字名称：输出只留下合法事件，且原始字典中没有 normalized_name。这个答案比把 JavaScript 的 filter/map 逐词替换更长，但每一个数据边界都可以单独排错。</p>
+</SolutionReveal>
+
+## 与后续 AI 数据工程的连接
+
+JSON、CSV 或 HTTP 响应进入数据准备管线时，第一步不是直接送入模型，而是判断字段是否存在、数字是否真的为数字、文本是否需要规范化。`dict` 适合解析阶段，`tuple` 可以作为不希望被后续函数改写的特征快照，`set` 可以校验标签集合，`list` 适合有顺序的 batch。后面的控制流会把这些容器组合成可读的过滤步骤，函数课程会把校验边界变成可测试接口。
+
+## 小结
+
+本节的核心不是记住更多符号，而是建立四个判断：解释器版本决定运行环境，名称绑定不等于对象修改，容器类型表达数据形状，切片和拷贝决定共享关系。带着这四个判断迁移 JS/TS，你就能先写出可观察、可验证的 Python 数据处理脚本。

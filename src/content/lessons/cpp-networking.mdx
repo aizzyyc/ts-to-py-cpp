@@ -1,0 +1,151 @@
+---
+id: cpp-networking
+slug: networking-ipc-and-boundaries
+title: "网络、IPC 与进程边界"
+summary: "比较 socket、共享内存、CLI 和消息中间件，选择合适的组件连接方式。"
+track: cpp
+order: 23
+durationMinutes: 18
+concepts: [networking, ipc, protocols]
+prerequisites: [cpp-realtime]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 网络、IPC 与进程边界
+
+JS/TS 项目常用 HTTP 或 WebSocket；机器人系统还会在节点间使用 ROS 2、Unix domain socket、共享内存或设备驱动 API。选择连接方式要先定义消息大小、频率、允许延迟、断连动作和安全边界。网络字节流没有消息边界，进程退出也不会自动通知业务状态，协议必须把这些故障写出来。
+
+### 请求、流和共享内存的取舍
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const ws = new WebSocket(url);
+ws.onmessage = event => handle(JSON.parse(event.data));
+ws.send(JSON.stringify(command));`}
+  targetLabel="C++"
+  targetLanguage="cpp"
+  target={`TcpClient client{endpoint};
+client.send(encode_frame(command));
+if (auto frame = client.receive(timeout)) handle(decode_frame(*frame));`}
+/>
+
+HTTP 适合配置和查询，WebSocket 适合浏览器持续看到状态，ROS 2 topic 适合机器人内部的类型化流。高频图像可能需要共享内存减少复制，但同步、权限、版本和崩溃恢复的成本会上升。实时控制不应直接信任一个可重放的 Web 请求，要增加序列号、超时、授权和失联安全动作。
+
+### 帧格式比 send 一次更重要
+
+```cpp
+#include <cstdint>
+#include <vector>
+
+struct FrameHeader {
+  std::uint16_t version{};
+  std::uint32_t payload_size{};
+  std::uint64_t sequence{};
+};
+
+bool valid_header(const FrameHeader& header, std::size_t max_payload) {
+  return header.version == 1 && header.payload_size <= max_payload;
+}
+```
+
+真实网络代码不能直接把 `FrameHeader` 的内存布局当作线协议：padding、字节序和对齐可能不同，应逐字段按约定编码。接收端要先读固定头，再校验版本、长度和序号，最后读取完整 payload；部分读取、超时和断连都应是正常分支。解析器要限制最大长度，避免恶意或损坏消息让内存无限增长。
+
+### IPC 的故障模型
+
+共享内存进程崩溃后可能留下半写数据，需要双缓冲、序号或原子发布协议；socket 断开后需要重连、退避和状态重置；CLI 子进程失败要检查退出码和 stderr。ROS 2 会提供发现与序列化，但 QoS 不会替你决定权限、版本兼容或业务重试。跨语言边界优先使用可抓包、可回放和可单测的格式。
+
+### 编译、链接和运行时排错
+
+`undefined reference` 先确认网络库 target 和平台库链接；编译过却收不到消息，检查监听地址、端口、协议版本和 framing。连接成功后偶发解析错误，打印 sequence、payload_size 和实际读取字节数。运行时超时要区分对端未发送、读取被信号打断和本地线程饥饿；不要无限重试，否则断连会拖死控制循环。
+
+### 学习目标
+
+你将学会区分 request/response、stream 和共享内存；设计版本、长度和序号字段；处理 partial read、timeout、断连和重连；把 Web 控制台、网关和 ROS 2 节点的权限、生命周期和安全动作写进协议。
+
+### 解析器先校验长度
+
+```cpp
+bool valid_header(const FrameHeader& header, std::size_t max_payload) {
+  return header.version == 1 &&
+         header.payload_size <= max_payload &&
+         header.payload_size > sizeof(std::uint64_t);
+}
+```
+
+这段函数只验证 header，真正的 `recv` 仍需循环读取完整头和 payload，因为一次读取不保证得到一帧。测试版本错误、长度为 0、超上限、序号倒退和合法边界，确认不会提前分配超大内存。
+
+### partial read 和超时
+
+```cpp
+bool read_exact(Socket& socket, std::span<std::byte> buffer,
+                std::chrono::milliseconds timeout) {
+  std::size_t offset = 0;
+  while (offset < buffer.size()) {
+    auto count = socket.receive(buffer.subspan(offset), timeout);
+    if (!count) return false;
+    offset += *count;
+  }
+  return true;
+}
+```
+
+让 fake socket 依次返回 2、3 和剩余字节，验证解码器只收到完整帧；中途 timeout 要释放临时 payload 并记录 sequence。网络线程不能无限重试拖住实时控制线程，控制命令还要带有效期和权限。
+
+### JS/TS 迁移的协议反例
+
+`JSON.stringify` 不会自动定义版本、单位和上限；WebSocket 的 `onmessage` 也不代表输入可信。不要把 TCP `send` 一次当成对端一次 `recv`，不要盲目重试运动命令，也不要把共享内存的可变对象当作天然安全。跨语言边界要能抓包、回放和单测。
+
+### 进程边界的可观测性
+
+记录 `connection_id`、`sequence`、payload bytes、send/receive timestamp、parse_error、retry_count 和 heartbeat。网关将浏览器请求转成受限命令，控制节点验证序号与有效期，失联进入安全状态。集成测试用 fake peer 注入半包、坏版本、断连和延迟，确认故障不会阻塞控制循环。
+
+<KeyIdea title="协议先定义故障，再讨论吞吐">
+  <p>消息边界、版本、长度、序号、超时和断连恢复是网络接口的基本契约。共享内存减少拷贝，却把同步和恢复责任带回应用。</p>
+</KeyIdea>
+
+## 迁移练习
+
+为“浏览器调整机器人参数”“显示持续状态”“发送安全速度命令”分别选择 HTTP、WebSocket、ROS 2 或其他 IPC，并写出 framing、超时、重连和权限策略。实现一个固定头解析函数，拒绝错误版本和超过上限的 payload。
+
+<Exercise
+  title="给机器人控制边界选协议"
+  prompt="画出 Web 控制台、网关进程和控制节点的边界；为每条连接列出消息格式、断连动作、重试规则和可观测指标。"
+  hint="持续状态和请求响应的生命周期不同；实时控制要有序列号、有效期和失联安全状态。"
+  solution={`配置查询可用 HTTP；持续状态可用 WebSocket 或 ROS 2 topic；速度命令经过网关并带序列号、有效期和权限，控制节点超时则进入安全输出。每条连接记录连接状态、读写超时、重连次数、解析失败和最后序号。`}
+/>
+
+<SolutionReveal>
+  <p>网络和 IPC 的核心学习成果是故障边界可见、协议可验证。下一节会把 CMake 依赖和这些通信组件组织进 ROS 2 工作区。</p>
+</SolutionReveal>
+
+## 延伸实践：让控制命令有生命周期
+
+机器人控制消息不能只携带一个速度数值，还要说明它何时产生、何时失效、由谁发出以及是否已经被处理。可以把协议对象写成显式的数据结构，让网关和控制节点共享同一组校验规则。这样浏览器刷新、网络重连或旧消息重放时，控制节点仍能拒绝过期命令，而不是把旧速度继续执行。
+
+```cpp
+struct Command {
+  std::uint64_t sequence{};
+  std::int64_t expires_at_ns{};
+  float linear_x{};
+};
+
+bool acceptable(const Command& command, std::int64_t now_ns) {
+  return command.sequence > 0 &&
+         command.expires_at_ns >= now_ns &&
+         std::isfinite(command.linear_x) &&
+         std::abs(command.linear_x) <= 1.0F;
+}
+```
+
+用固定的 `now_ns` 测试刚好未过期、刚好过期、重复序号、NaN 和超范围速度，预期只有合法命令进入控制队列。编译时打开 `-Wall -Wextra -Wconversion`，把浮点到整数或有符号/无符号比较的警告当成协议审查线索。运行集成测试时模拟半包、延迟和重连，验证故障会回到安全状态；不要用 `sleep` 代替明确的时钟和超时输入。
+
+## 小结补充
+
+从 JS/TS 的 `fetch`、WebSocket 和子进程迁移到 C++ 网络边界，真正需要迁移的是“输入不可信、读取可能不完整、资源必须释放、失败必须可恢复”的工程模型。下一节进入 ROS 2 workspace 时，Topic 和 Service 仍然要用同样的序号、时间、版本和失败证据来设计。
+
+再做一次离线演练：让 fake peer 先发送一个合法 header 的一半，再等待超时，随后发送错误版本和超长 payload。记录每一步返回的错误类型、已读取字节数和连接状态，确认解析器没有把半包当成有效命令，也没有在拒绝后继续消费旧 buffer。这个练习会把网络协议从“能连上”提升为“在异常输入下仍能安全停止”。最后把这组日志保存为测试 fixture，确保以后修改 framing 或重连策略时仍能重放。

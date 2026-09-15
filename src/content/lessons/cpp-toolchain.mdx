@@ -1,0 +1,149 @@
+---
+id: cpp-toolchain
+slug: compile-link-and-cmake
+title: "编译、链接与 CMake"
+summary: "把 bundler 和运行时的经验转换成 C++ 的编译产物和构建目标。"
+track: cpp
+order: 1
+durationMinutes: 12
+concepts: [compiler, linker, cmake]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+完成本节后，你应该能解释 C++ 从源文件到可执行文件的四个阶段，独立用命令行编译一个小程序，读懂编译错误与链接错误的区别，并用 CMake 把包含传感器模块的多文件程序描述成可重复构建的 target。这里不是背命令，而是建立“哪个工具负责哪一件事”的调试地图。
+
+## JS/TS 构建直觉如何迁移
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'npm run build'} targetLabel="C++" targetLanguage="cpp" target={'cmake --build build --parallel'} />
+
+在 TypeScript 项目中，tsc 或 bundler 往往把解析 import、类型检查、转译和打包藏在一条脚本里；C++ 则把源文件分别编译成 object file，再由 linker 组合符号。头文件类似类型声明和 API 契约，但它不会自动带来函数实现。把 import 想成“知道名字”，把链接输入想成“真的把实现交进来”，是最重要的迁移模型。
+
+反例是把 C++ 的 include 当成 JavaScript 的运行时 import：include 主要是预处理阶段的文本展开。如果头文件中只有 double read_range_m();，而 read_range_m 的定义所在 cpp 没有加入 target，源码可以通过编译，最后仍会链接失败。
+
+## 示例一：最小传感器程序
+
+先只使用标准库，排除第三方依赖。main 是进程入口，const double 表示这次读取的距离不应在当前作用域被改写，cout 将测量值写到标准输出。
+
+~~~cpp
+#include <iostream>
+
+int main() {
+  const double range_m{1.25};
+  std::cout << "range=" << range_m << " m\n";
+}
+~~~
+
+使用 c++ -std=c++20 -Wall -Wextra -Wpedantic main.cpp -o range_check 编译，再运行 ./range_check。预期输出是 range=1.25 m。退出码为 0、输出稳定且没有 warning，才算完成了最小验证；编辑器没有红线并不等于生成了可执行文件。
+
+## 示例二：头文件、实现和链接
+
+把传感器读取器拆成声明与定义，观察每个文件的职责。
+
+~~~cpp
+// range_sensor.hpp
+#pragma once
+double read_range_m();
+
+// range_sensor.cpp
+#include "range_sensor.hpp"
+double read_range_m() { return 1.25; }
+
+// main.cpp
+#include <iostream>
+#include "range_sensor.hpp"
+int main() { std::cout << read_range_m() << " m\n"; }
+~~~
+
+验证路径是先执行 c++ -std=c++20 -c range_sensor.cpp -o range_sensor.o 与 c++ -std=c++20 -c main.cpp -o main.o，再执行 c++ main.o range_sensor.o -o range_check。如果漏掉 range_sensor.o，两个编译命令仍可能成功，但链接阶段会出现 undefined reference to read_range_m()。这与 TS 中“类型声明存在，但运行时模块没有正确打包”很像，只是 C++ 把失败推迟到了 linker。
+
+## 示例三：用 CMake 描述 target
+
+手写命令适合理解阶段，项目协作需要把源文件、标准版本和 warning 固化。
+
+~~~cmake
+cmake_minimum_required(VERSION 3.20)
+project(range_check LANGUAGES CXX)
+
+add_executable(range_check main.cpp range_sensor.cpp)
+target_compile_features(range_check PRIVATE cxx_std_20)
+target_compile_options(range_check PRIVATE -Wall -Wextra -Wpedantic)
+~~~
+
+执行 cmake -S . -B build，再执行 cmake --build build --parallel，最后运行 ./build/range_check。add_executable 中列出的不是可选文件清单，而是构建图的输入。接入机器人 SDK 时，把依赖通过 target_link_libraries 绑定到具体 target，而不是把路径塞进全局变量。
+
+## 四个阶段与输出产物
+
+预处理会展开 include 和宏，编译器把每个翻译单元转换成 object file，链接器解析外部符号并生成可执行文件，操作系统启动程序时还要装载动态库。可以用 c++ -E 查看预处理结果，用 c++ -c 隔离单文件错误。每一步的产物都能帮助你缩小问题范围，而不是一次只运行一个神秘的 build 脚本。
+
+## 编译、链接和运行时错误
+
+expected ';'、not declared、类型不匹配属于编译错误：先看首个错误的文件和行号，再检查 include、命名空间、拼写和标准版本。undefined reference 属于链接错误：核对定义是否存在、实现文件是否进了 target、声明和定义的参数是否完全一致。程序启动后找不到动态库属于运行时装载错误：再查库搜索路径、架构、ABI 和环境变量，不能继续添加 include。
+
+改了 CMake 标准、编译器或依赖路径后重新 configure，避免增量构建继续使用旧缓存。机器人驱动还要确认本机产物和目标设备的 CPU 架构、Debug/Release 配置与 C++ ABI 一致。
+
+## 机器人连接：构建也是部署契约
+
+一个激光雷达节点可能依赖消息类型、数学库、设备 SDK 和线程库。编译通过只说明源码可翻译，链接通过才说明符号关系完整，部署后启动成功还需要目标机能加载同一套动态库。把每个依赖挂在明确的 CMake target 上，能让“驱动没装”“消息库版本不匹配”和“源码写错”在日志中分开出现。
+
+<KeyIdea title="先判断失败发生在哪一层">
+  <p>编译器检查翻译单元，链接器拼接符号，操作系统装载运行时依赖。C++ 排错的第一步永远是给错误归层，而不是盲目增加 include 或删除整个 build 目录。</p>
+</KeyIdea>
+
+## 动手练习
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'import { read } from "./sensor.js";'} targetLabel="C++" targetLanguage="cpp" target={'#include "range_sensor.hpp"'} />
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'node dist/main.js'} targetLabel="C++" targetLanguage="cpp" target={'./build/range_check'} />
+
+创建 range_check：从命令行读取一个米数，打印 safe 或 blocked；再把读取逻辑拆成 range_sensor.hpp 与 range_sensor.cpp，分别用手动命令和 CMake 构建。最后故意不把实现文件加入链接命令，记录编译阶段和链接阶段的不同输出。
+
+<Exercise title="画出你的第一条 C++ 构建链" prompt="写出预处理、编译、链接、运行四个阶段的命令或对应 CMake target，并解释遗漏头文件与遗漏实现文件分别会在哪一层失败。" hint="先让 main.cpp 只 include 声明，再分别生成两个 .o；链接时必须把定义所在的 .o 也交给 c++。" solution="遗漏实现文件时，编译可能成功，但链接器会报告 undefined reference；CMake target 必须列出 main.cpp 和 range_sensor.cpp。" />
+
+<SolutionReveal>
+  <p>如果你能从错误首行判断它属于编译、链接还是运行时，C++ 工具链就已经从黑盒命令变成可观察的工程流程。把这张分层地图带到下一节的初始化练习中。</p>
+</SolutionReveal>
+
+## 延伸实践与验证
+
+
+## 从手写命令到可复现构建
+
+手写命令的价值是让你看见每个阶段，CMake 的价值是把这些决定保存成项目配置。configure 阶段选择编译器、生成器和依赖位置；build 阶段根据文件时间和依赖关系决定哪些目标需要重新编译；install 或打包阶段才把产物放到部署目录。不要把 build 目录当源码，也不要在源码目录里凭记忆运行一串带有隐藏环境变量的命令。
+
+一个适合学习和排错的流程是先用 Debug 配置，开启符号和 sanitizer；确认逻辑正确后再用 Release 配置测量性能。Debug 和 Release 可能使用不同的优化、宏和库，不能只在 Debug 中验证一次就假设机器人现场行为相同。把编译器版本、C++ 标准、目标架构和依赖版本记录在 README 或构建日志中，之后才能复现一个现场问题。
+
+## 一次完整验证记录
+
+对 range_check 可以按以下顺序检查：
+
+~~~text
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build --parallel
+./build/range_check 1.25
+echo $?
+~~~
+
+Windows 或其他 shell 的退出码命令有所不同，但验证思想相同：配置成功、编译成功、程序启动成功、输入得到预期状态、退出码符合约定。再测试负数、缺少参数和无法解析的文本，确认程序不会把错误输入当成有效距离。若是多文件工程，列出 build 目录中的目标文件，确认实现文件确实进入了 target，而不是只存在于编辑器项目树中。
+
+## 失败实验：让错误变得可解释
+
+你可以故意做三次实验。第一，把 main 中的分号删掉，记录编译器指出的文件和行号；第二，从最后的链接命令中删除 range_sensor.o，记录 undefined reference；第三，把动态库路径从运行环境中移除，记录程序启动时的装载错误。实验结束后恢复文件，再执行一次完整构建，确认没有把失败实验留下的缓存当作结果。
+
+如果错误信息很多，先修第一条，而不是同时修改十个文件。编译器经常会因为一个缺少分号而产生后续级联错误；链接器的第一条缺失符号往往揭示真正的 target 边界。用 verbose build 查看 CMake 最终执行的完整命令，确认标准版本、include 路径和 link 库确实是你以为的值。
+
+## 系统工程中的构建契约
+
+机器人软件通常由设备驱动、消息适配、算法库和节点可执行文件组成。每个模块都应该有清楚的 target，依赖通过 target 传递，而不是依赖开发者本机恰好设置的全局路径。这样在交叉编译到 ARM 设备、容器构建或 CI 构建时，缺失的 SDK、错误架构和不兼容 ABI 才会尽早暴露。
+
+构建文件还应告诉团队 warning 策略、测试入口和安装位置。不要因为某个第三方库有 warning 就关闭整个项目的 warning；必要时只对第三方 target 设置例外。一个可以从干净目录重新生成的构建，比某个成员机器上“刚好能跑”的二进制更值得信任。
+
+
+## 小结与下一步
+
+  你现在可以把 C++ 构建看作一张可观察的依赖图：源文件提供实现，头文件提供契约，CMake 记录输入和编译选项。下一节将把注意力从“如何生成程序”转到“表达式、初始化和作用域如何避免错误”，这是所有传感器回调和控制逻辑的语法基础。

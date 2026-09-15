@@ -1,0 +1,151 @@
+---
+id: cpp-ros-plugins
+slug: ros2-plugins-and-extensibility
+title: "ROS 2 插件与可扩展节点"
+summary: "把算法实现和运行时装配分开，理解插件描述、工厂和可替换机器人能力。"
+track: cpp
+order: 33
+durationMinutes: 22
+concepts: [plugins, extensibility, runtime loading]
+prerequisites: [cpp-ros-qos]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## ROS 2 插件与可扩展节点
+
+JS/TS 可以动态 `import` 不同实现；C++ 插件通常把稳定抽象编译成共享库，再由 pluginlib/class loader 按名称创建实例。驱动、规划器和代价地图层常用这种方式支持不同设备型号。插件化的难点不只是找到 `.so`/`.dll`，还包括 ABI、虚函数析构、线程、资源释放和版本诊断。
+
+## 学习目标
+
+- 能把 JS/TS 的动态 import 迁移成有稳定 C++ 抽象、共享库和 pluginlib 描述的插件。
+- 能解释虚函数 ABI、析构、线程、ROS 资源和模型内存为什么属于插件契约的一部分。
+- 能从“类找不到、符号缺失、运行行为不对”建立逐层加载与版本调试路径。
+
+### 插件边界让算法和设备脱钩
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`type Planner = { plan(goal: Goal): Path };
+const planner = await import("./planners/" + name + ".js");
+return planner.plan(goal);`}
+  targetLabel="C++"
+  targetLanguage="cpp"
+  target={`class Planner {
+public:
+  virtual Path plan(const Goal&) = 0;
+  virtual ~Planner() = default;
+};
+pluginlib::ClassLoader<Planner> loader{"planner_pkg", "Planner"};
+auto planner = loader.createSharedInstance(name);`}
+/>
+
+宿主只依赖 `Planner` 的公共头，插件不应访问宿主 private 成员或把宿主 allocator 当稳定 ABI。`const Goal&` 是借用，`Path` 按值返回由调用者拥有；若返回引用，必须说明插件内部对象的寿命。接口改动要同步重新编译所有插件，不能假设旧共享库仍兼容。
+
+### 一个可测试的插件接口
+
+```cpp
+struct Planner {
+  virtual ~Planner() = default;
+  virtual std::string id() const = 0;
+  virtual std::optional<Path> plan(const Goal& goal) = 0;
+};
+
+class StraightLinePlanner final : public Planner {
+public:
+  std::string id() const override { return "straight_line"; }
+  std::optional<Path> plan(const Goal& goal) override {
+    if (!goal.valid()) return std::nullopt;
+    return make_path(goal);
+  }
+};
+```
+
+生产插件要用导出宏和 XML description 声明类名、基类、库和版本，CMake 安装共享库与 description。核心算法应在加载前即可单测；加载测试再验证 class name、库路径、构造失败和析构顺序。`optional` 适合“没有可行路径”，复杂失败则返回带错误码的结果或通过诊断 topic 说明原因。
+
+### ABI 和生命周期契约
+
+稳定插件接口避免暴露 STL 布局、编译器私有类型和跨边界异常；优先传值对象、纯虚函数和明确所有权。宿主销毁 loader 前要销毁实例，插件线程必须先停止再卸载共享库。插件可以拥有设备句柄，但 RAII 清理不应在宿主已经销毁的 callback 上运行。对不同编译器/ROS 发行版，版本信息和构建选项要纳入装配检查。
+
+### 常见编译、链接、运行时错误
+
+编译找不到 pluginlib 头文件检查 manifest/CMake；链接缺少 vtable 或导出符号检查虚函数定义、共享库和 export macro。运行时 `class does not exist` 检查 XML 类名、基类字符串、install 路径和 overlay；`library not found` 查动态库搜索路径。加载成功后崩溃常来自 ABI 不匹配、非虚析构或插件线程访问已卸载代码，先打印库版本和关闭顺序。
+
+<KeyIdea title="插件接口是 ABI 和生命周期的合约">
+  <p>稳定抽象、导出描述、版本信息和可逆关闭共同决定插件是否可维护。把核心算法和动态装配分开，错误才有清晰边界。</p>
+</KeyIdea>
+
+## 迁移练习
+
+设计一个 Planner 插件接口：输入目标位姿，成功返回拥有的 Path，失败区分无解和配置错误。列出 XML/库/基类信息、线程停止顺序和加载失败诊断字段；为内建 fake planner 与动态加载 planner 分别设计测试。
+
+<Exercise
+  title="为不同机器人装配规划器插件"
+  prompt="写出稳定接口、插件导出描述和宿主创建流程；说明类名、版本、ABI、库路径或构造失败如何进入诊断。"
+  hint="输入用 const 引用，输出按值或拥有型结果；虚析构、loader 生命周期和插件线程都要有明确规则。"
+  solution={`接口可用 virtual ~Planner()、id() 和 optional<Path> plan(const Goal&)；宿主用 ClassLoader 按配置名称创建。记录 package/class/library/version、当前 ROS overlay 和原始异常；实例先停线程并销毁，再销毁 loader，避免卸载后仍有回调执行。`}
+/>
+
+### 先定义稳定的 C++ 抽象
+
+插件接口应表达算法需要的最小能力，而不是暴露驱动对象的全部细节。返回值要有失败语义，析构函数必须是 virtual，所有权要通过引用、值或 `std::unique_ptr` 明确说明。
+
+```cpp
+struct Planner {
+  virtual ~Planner() = default;
+  virtual std::expected<Path, PlanError>
+  plan(const Pose& start, const Pose& goal) = 0;
+};
+
+class GridPlanner final : public Planner {
+public:
+  std::expected<Path, PlanError> plan(
+      const Pose& start, const Pose& goal) override;
+};
+```
+
+机器人运行时通常需要在配置阶段创建地图、TF buffer 或模型资源，在 shutdown 阶段释放它们；不要让插件构造函数偷偷启动线程而不给宿主停止接口。
+
+### plugin XML 和导出宏连接运行时
+
+`pluginlib_export_plugin_description_file`、XML 中的 class type、命名空间和 `PLUGINLIB_EXPORT_CLASS` 必须指向同一个实现。编译通过但 `ClassLoader::createSharedInstance` 找不到类，往往是 XML 没安装、包没有被发现或 base class 字符串不同。
+
+```xml
+<library path="grid_planner">
+  <class type="robot_planners::GridPlanner"
+         base_class_type="robot_planners::Planner">
+    <description>Deterministic grid planner</description>
+  </class>
+</library>
+```
+
+```cpp
+PLUGINLIB_EXPORT_CLASS(robot_planners::GridPlanner,
+                       robot_planners::Planner)
+```
+
+用 `ros2 pkg prefix robot_planners` 检查安装路径，再让测试列出 declared classes 并创建一个实例；这比只检查 `.so` 文件存在更可靠。
+
+### 加载失败与 ABI 问题
+
+如果报 `ClassLoader`、undefined symbol 或 bad cast，依次检查 base class 头文件和纯虚函数签名、编译器/标准库 ABI、依赖库版本、RPATH 和 overlay 顺序。插件和宿主共享接口头文件但不应各自复制一份定义。改动 virtual method、成员布局或编译选项后，旧共享库可能仍在 install 空间，先清理隔离的 build/install/log 目录再验证。
+
+### 插件线程与 ROS 资源生命周期
+
+插件里创建 subscription 或 timer 时，必须由 node 或明确的 RAII owner 持有；回调捕获的 `this` 在卸载前要解除。推理插件通常会分配大模型内存，加载和热切换不应发生在实时控制回调内。切换策略时先停止新请求、等待旧请求、交换 `unique_ptr`，失败则恢复旧插件并记录版本。
+
+### 可替换能力的测试策略
+
+用一个 deterministic fake planner 验证宿主的 goal、失败和取消逻辑，再用真实插件做加载集成测试，最后在仿真地图比较路径质量与延迟。日志至少包括插件类名、共享库版本、参数摘要、创建耗时和失败原因；不要只输出“loaded successfully”。现场遇到规划器行为变化时，先确认实际加载的类和 install 路径，避免调错源码版本。
+
+### 常见错误与调试路径
+
+加载失败先用 `ros2 pkg prefix` 和安装目录确认 XML、共享库与 overlay，再检查 base class 字符串和导出宏；`undefined symbol` 看依赖与 ABI；加载成功但输出错误，打印实际 class name、参数版本和输入 frame。不要通过复制接口头文件或静态全局对象掩盖版本不一致。
+
+<SolutionReveal>
+  <p>插件化不是把 import 换成 loader，而是把 ABI、配置、资源和关闭顺序显式化。下一节会在可替换组件基础上用仿真验证机器人行为。</p>
+</SolutionReveal>

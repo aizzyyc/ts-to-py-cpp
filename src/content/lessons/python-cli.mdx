@@ -1,0 +1,171 @@
+---
+id: python-cli
+slug: cli-arguments-and-configuration
+title: "CLI 参数与配置入口"
+summary: "将 npm scripts 迁移到 argparse，让命令行工具具备帮助信息和可测试入口。"
+track: python
+order: 10
+durationMinutes: 14
+concepts: [cli, argparse, configuration]
+prerequisites: [python-http]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标：把 CLI 当成稳定的自动化接口
+
+本节结束时，你能把 JavaScript/TypeScript 中的 `process.argv`、环境变量和 npm script 迁移到 Python `argparse`，并解释参数解析、配置合并、退出码和业务执行各自负责什么。你还会写出可由 pytest 直接调用的 `main(argv=None)`，让数据准备、评估或推理命令既适合人手运行，也适合 CI、容器和调度系统运行。
+
+CLI 不是“把几行脚本包进一个文件名”。一旦它被数据管线调用，参数名、默认值、帮助文本、标准输出、标准错误和退出码就成为公共 API。本节的所有例子都把配置收束成一个对象，再把这个对象交给纯业务函数；这样运行结果更容易重放，也更容易判断是输入问题还是处理问题。
+
+## 从 JS/TS 迁移的心智模型：argv 只是配置的一种来源
+
+JavaScript/TypeScript 里常见的写法是直接读 `process.argv[2]`，再用 `process.env.LIMIT` 补默认值。它能快速启动，但缺少参数说明、类型错误和稳定的失败边界。Python 的 `ArgumentParser` 会根据声明生成 `--help`，把字符串转换成目标类型，并在解析失败时写入 stderr、返回退出码 2；它不会替你判断数值是否有业务意义，也不会自动合并配置文件。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const input = process.argv[2] ?? "events.jsonl";
+const limit = Number(process.env.LIMIT ?? 100);
+await run({ input, limit });`}
+  targetLabel="Python"
+  targetLanguage="python"
+  target={`parser = argparse.ArgumentParser(description="prepare AI events")
+parser.add_argument("input", nargs="?", default="events.jsonl")
+parser.add_argument("--limit", type=int, default=100)
+args = parser.parse_args(argv)
+run(Config(input=args.input, limit=args.limit))`}
+/>
+
+### 1. argparse 的解析行为：字符串先进入边界
+
+命令行本质上从 shell 传来字符串列表。位置参数描述必需的输入，选项参数用 `--name` 表达可选配置，`type=int` 只做转换而不做范围校验，`choices` 可以限制离散值，`action="store_true"` 可以表示开关。`parse_args()` 默认读取全局 `sys.argv[1:]`，而 `parse_args(argv)` 使用调用者提供的列表；后一种形式是可测试入口的基础。
+
+```python
+import argparse
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class Config:
+    input_path: str
+    output_path: str
+    limit: int
+    label: str | None
+
+def parse_args(argv: list[str] | None = None) -> Config:
+    parser = argparse.ArgumentParser(description="prepare labeled AI events")
+    parser.add_argument("input_path")
+    parser.add_argument("--output", dest="output_path", default="prepared.jsonl")
+    parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument("--label")
+    args = parser.parse_args(argv)
+    if args.limit < 1:
+        parser.error("--limit must be positive")
+    return Config(args.input_path, args.output_path, args.limit, args.label)
+```
+
+注意 `parser.error()` 的行为：它打印一行以 `usage:` 开头的诊断到 stderr，然后抛出 `SystemExit(2)`。这与“数据文件读不到”不同，后者是业务执行阶段的失败，通常由 `main` 返回 1。把范围检查写在解析边界，可以让错误尽早出现；把文件读取放在 `run`，则可以单独测试解析而不需要磁盘 fixture。
+
+### 2. 配置优先级：默认值、文件、环境变量、CLI
+
+一个可解释的约定是：内置默认值 < 配置文件 < 环境变量 < CLI 显式值。关键不在于一定选哪套顺序，而在于每个来源是否可见、是否能区分“用户没有提供”和“用户明确提供了默认值”。如果 argparse 直接把默认值填成 100，后续就不知道 `--limit` 是否由用户指定；可以先用 `default=None` 解析，再单独合并配置。
+
+```python
+import os
+from pathlib import Path
+
+def merge_config(args, file_config: dict[str, object]) -> Config:
+    limit = args.limit
+    if limit is None:
+        limit = os.getenv("EVENT_LIMIT", file_config.get("limit", 100))
+    limit = int(limit)
+    if limit < 1:
+        raise ValueError("limit must be positive")
+    output = args.output_path or str(file_config.get("output", "prepared.jsonl"))
+    return Config(Path(args.input_path).as_posix(), output, limit, args.label)
+```
+
+这个例子中，环境变量仍然是字符串，所以合并阶段必须再次转换和校验；配置文件的值也不能盲信。生产命令启动时可以记录最终的非敏感配置、输入文件哈希、代码版本和 schema 版本，但绝不能把 API token 放在帮助文本或日志里。配置优先级如果不写在文档和测试里，CI 与本地运行很快会产生不同结果。
+
+### 3. 可测试的 main 与退出码
+
+让 `main(argv=None) -> int` 只做三件事：解析并校验配置、调用 `run(config)`、把可预期的业务异常翻译成 stderr 和非零返回值。不要在深层函数里直接调用 `sys.exit`，因为测试一旦调用它就会被进程级异常打断。模块末尾才使用 `raise SystemExit(main())`，把整数交给 shell。
+
+```python
+import sys
+
+def run(config: Config) -> dict[str, int]:
+    if config.input_path == config.output_path:
+        raise ValueError("input and output must be different")
+    return {"read": 2, "written": min(config.limit, 2)}
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        config = parse_args(argv)
+        stats = run(config)
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"written={stats['written']}")
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+这里要区分三种结果：合法参数且业务成功，输出统计并返回 0；参数语法错误，由 argparse 返回 2；参数合法但文件或业务规则失败，返回 1。稳定的退出码让 CI 能自动阻断坏数据，也让上层调度器区分“重跑无效”与“暂时故障”。输出统计应是可解析的短文本或 JSON，不要混入完整样本内容。
+
+## 运行验证：从 help 到可观察输出
+
+先运行 `python -m package.prepare --help`，确认帮助中出现 input、output、limit 和 label；再运行 `python -m package.prepare events.jsonl --limit 2`，预期输出类似 `written=2`、进程退出码为 0。随后运行 `--limit 0`，预期 stderr 出现 `--limit must be positive`、退出码为 2；让输入路径不存在，预期业务错误退出码为 1。
+
+pytest 不需要修改全局 `sys.argv`：直接调用 `parse_args(["events.jsonl", "--limit", "2"])`，断言 Config.limit 等于 2；调用 `main(["events.jsonl", "--limit", "0"])` 时捕获 argparse 的 `SystemExit` 并断言 code 为 2；给 `run` 注入 fake 数据读取器，验证统计和输出。这样每个运行结果都对应一条明确的输入路径。
+
+## 常见错误、排错与调试路径
+
+直接访问 `sys.argv[1]` 会在缺参时产生 `IndexError`；把 `--limit` 只声明成 `type=int` 会让 0 和负数通过；在 `main` 中使用 `print` 打印调试对象会污染机器可读输出；把相对路径当成固定路径则会在 CI 工作目录变化时失败。还有一个隐蔽问题是用环境变量覆盖 CLI 显式值，导致用户传入的参数看似没有生效。
+
+排错按四步进行：第一运行 `--help` 看声明是否真的加载；第二打印或断言归一化后的 Config，而不是原始 `argv`；第三用最小 JSONL fixture 重现业务错误；第四检查 stderr、stdout 和退出码是否符合约定。若 AI 数据准备任务结果数量不对，再对照最终配置、输入哈希、limit 和过滤统计，不要先怀疑模型。凭据问题只记录变量名和是否存在，不记录变量值。
+
+## 练习：为数据准备工具设计入口
+
+任务是增加 `input`、`--output`、`--limit`、`--label` 和 `--config` 参数，采用“默认值 < 配置文件 < 环境变量 < CLI 显式值”的优先级。`parse_args(argv)` 必须可被 pytest 直接调用，`main` 在业务异常时返回 1，成功时返回 0；请验收帮助文本、缺少 input、limit 为零、路径冲突和合法配置五种结果。
+
+<KeyIdea title="入口函数要薄，配置要集中">
+  <p>CLI 的参数解析是自动化系统的 API。稳定的帮助文本、退出码和最终配置记录，会直接降低 AI 数据管线的协作成本。</p>
+</KeyIdea>
+
+<Exercise
+  title="CLI 参数与配置入口练习"
+  prompt="为数据准备工具增加 input、output、limit 和 label 参数，让 parse_args(argv) 可被 pytest 直接调用，并让 main 在业务异常时返回 1。"
+  hint="argparse 只负责解析；让 main 只负责组装 Config、调用 run 和翻译 OSError/ValueError。"
+  solution={`def main(argv=None):
+    try:
+        config = parse_args(argv)
+        stats = run(config)
+        print(stats)
+        return 0
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+if __name__ == "__main__":
+    raise SystemExit(main())`}
+/>
+
+<SolutionReveal>
+  <p>完整答案还应包括测试：合法参数返回 Config，limit 为零在解析阶段得到退出码 2，run 抛出 OSError 时 main 返回 1，合法 run 输出统计并返回 0。再添加一个配置优先级测试，确保 CLI 显式值不会被环境变量悄悄覆盖。</p>
+</SolutionReveal>
+
+## 与 AI 数据、模型和服务的连接
+
+AI 任务往往不是由人手敲命令完成：数据抽取、JSONL 清洗、embedding 批处理、模型评估和推理服务健康检查都会由 CLI 启动。把最终配置、输入哈希、模型名称、模型版本、token 预算和输出路径写进运行记录，才能在指标变化时复盘“究竟跑了什么”。将凭据从环境变量或密钥管理服务读取，并让 CLI 只报告是否配置，避免 secrets 进入 shell history 和日志。
+
+如果 CLI 要调用远程模型服务，它还应给每批任务返回成功、跳过、失败数量，并把可重试错误与坏样本分开。退出码可以让调度器决定是否重试，输出的 JSON 统计可以让下游监控样本量和标签分布。也就是说，命令行入口既是开发者体验，也是 AI 数据管线的控制面。
+
+## 小结
+
+可靠的 Python CLI = argparse 的显式声明 + 可解释的配置优先级 + 薄的 `main(argv)` + 分层退出码 + 可重放的运行记录。迁移自 JS/TS 时，不要只把 `process.argv` 换成 `sys.argv`；要把解析、校验、业务执行和服务调用的责任分开，才能得到可测试、可调度的 AI 工具。

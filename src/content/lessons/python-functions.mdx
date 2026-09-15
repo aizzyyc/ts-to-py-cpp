@@ -1,0 +1,208 @@
+---
+id: python-functions
+slug: functions-modules-and-types
+title: "函数、模块与类型提示"
+summary: "把 TypeScript 的类型思维迁移到 Python 函数、模块和 type hints。"
+track: python
+order: 3
+durationMinutes: 10
+concepts: [functions, modules, typing]
+prerequisites: [python-control-flow]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+完成本节后，你应该能用 `def` 定义有清晰参数和返回值的函数；能区分返回一个值、返回 `None` 和原地修改；能安全处理默认参数、`*args`、`**kwargs` 和小型 `lambda`；能用 typing 表达意图；能把函数放进模块并用稳定的导入方式供数据准备或模型服务调用。
+
+## 从 JS/TS 迁移的心智模型
+
+在 JavaScript/TypeScript 中，函数既可以声明，也可以作为值传给 `map` 或事件处理器。Python 也是如此，但 `def` 语句会在执行到它时创建函数对象，缩进定义函数体。TypeScript 的 `number[]` 和返回类型会在编译期参与检查；Python 的类型提示默认只提供 IDE、静态检查器和读者使用，不会在运行时自动阻止字符串进入 `list[float]`。所以迁移时需要把“类型提示”和“输入校验”当作两层不同的边界。
+
+函数最好只负责一个可命名的转换：读取函数得到记录，清洗函数返回新的记录，模型函数接收已经校验的数据，服务层再负责 HTTP。这样每个阶段都有明确输入和输出，不需要依赖 notebook 的全局变量。Python 调用既支持位置参数，也支持关键字参数；对容易混淆的配置使用 keyword-only 参数，能把参数顺序错误提前变成清晰的异常。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`function meanScore(values: number[]): number | null {
+  return values.length
+    ? values.reduce((a, b) => a + b, 0) / values.length
+    : null;
+}`}
+  targetLabel="Python"
+  targetLanguage="python"
+  target={`def mean_score(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)`}
+/>
+
+### def、参数和返回值
+
+函数调用时，参数先绑定到名称，再执行函数体。`return` 立即结束本次调用；如果执行到函数末尾没有 `return`，Python 会返回 `None`。这和 JavaScript 中隐式的 `undefined` 相似，但不要把二者当成同一个值：在数据管线里，`None` 应被当成明确的“没有结果”，调用者要决定是跳过、补默认值还是报错。函数名通常使用 `snake_case`，而不是沿用 TypeScript 常见的 `camelCase`。
+
+### 示例一：把平均值边界写清楚
+
+```python
+from collections.abc import Iterable
+
+def mean_score(values: Iterable[float]) -> float | None:
+    numbers = [float(value) for value in values]
+    if not numbers:
+        return None
+    return sum(numbers) / len(numbers)
+
+for input_values in [[0.2, 0.8], [], (1, 3)]:
+    print(input_values, "->", mean_score(input_values))
+```
+
+输出：
+
+```text
+[0.2, 0.8] -> 0.5
+[] -> None
+(1, 3) -> 2.0
+```
+
+这个实现支持列表、空列表和元组，因为它依赖 iterable 而不是某一种容器。来自 JSON 的值仍可能是 `"0.8"`；这里显式 `float` 是转换，不是类型提示带来的魔法。若转换失败，应在边界捕获异常并补充字段或样本 id。
+
+### 默认参数、None 哨兵与副作用
+
+JavaScript 默认参数通常在调用时求值，而 Python 默认参数只在函数定义时求值。于是 `def add_tag(tag, tags=[])` 会让多次调用共享同一个列表。正确习惯是使用 `None` 作为哨兵，在函数体内创建新列表。还要说清楚函数是返回新列表还是修改调用者传入的列表；对于特征清洗，默认返回新对象更容易测试，但大数据场景要意识到复制成本。
+
+```python
+def add_tag(tag: str, tags: list[str] | None = None) -> list[str]:
+    result = [] if tags is None else list(tags)
+    result.append(tag)
+    return result
+
+first = add_tag("clean")
+second = add_tag("ready")
+print(first)
+print(second)
+```
+
+运行结果是两份互不共享的列表：
+
+```text
+['clean']
+['ready']
+```
+
+### *args、**kwargs 与调用协议
+
+`*args` 收集额外的位置参数，`**kwargs` 收集额外的关键字参数。它们适合包装器、日志钩子和少量可扩展选项，不适合把所有参数都隐藏起来。调用另一个函数时也能用 `*values` 和 `**options` 展开。和 TypeScript 的 rest 参数类似，但 Python 的 `kwargs` 是字典，调用者拼写错误的选项只有在你主动校验时才会被拒绝。
+
+```python
+def summarize(*scores: float, **options: object) -> dict[str, object]:
+    rounded = bool(options.get("round"))
+    average = sum(scores) / len(scores) if scores else None
+    if rounded and average is not None:
+        average = round(average, 2)
+    return {"count": len(scores), "average": average}
+
+print(summarize(0.3333, 0.6666, round=True))
+```
+
+输出是 `{'count': 2, 'average': 0.5}`。如果选项影响服务行为，应在函数签名中显式列出，而不是让任意 `**kwargs` 传遍整个系统。
+
+### lambda 只留给局部、简单的规则
+
+`lambda` 创建一个只有一个表达式的匿名函数，最常见用途是排序或短暂的 key。它不是把复杂业务压成一行的理由；需要日志、异常处理或多步判断时，写一个有名字的 `def`。下面按模型分数降序、再按 id 排序，排序键是可观察的普通数据。
+
+```python
+predictions = [
+    {"id": "b", "score": 0.72},
+    {"id": "a", "score": 0.72},
+    {"id": "c", "score": 0.91},
+]
+ordered = sorted(predictions, key=lambda row: (-row["score"], row["id"]))
+print([row["id"] for row in ordered])
+```
+
+结果为 `['c', 'a', 'b']`。如果 key 逻辑变成“缺字段则记录错误并回退”，就应改成命名函数并在测试中覆盖缺字段。
+
+### typing：表达意图，但不要假装完成校验
+
+Python 3.10+ 可以使用 `list[float]`、`dict[str, object]` 和 `float | None`；`collections.abc.Iterable` 适合表达“只需要可迭代”的输入。更复杂的 JSON 记录可以先用 `TypedDict` 或 dataclass 描述，再在解析函数中真正检查字段。`Any` 会让静态工具停止追问，应该只限制在确实无法描述的边界。类型提示应告诉读者“函数期望什么”，运行时校验应告诉程序“本次输入是否合格”。
+
+### 模块、导入与 main 保护
+
+一个 `.py` 文件就是一个模块，目录可以组织成包。导入模块时，顶层代码会执行，所以不要在导入阶段启动训练、打开摄像头或调用 HTTP。把命令行入口放在 `if __name__ == "__main__":` 下面，测试就能导入函数而不触发副作用。底层的 `features.py` 可以被 `prepare.py` 和服务共同导入，但底层不要反过来导入服务，否则容易产生循环导入。
+
+```python
+# features.py
+def normalize_text(text: str) -> str:
+    return " ".join(text.split())
+
+# prepare.py
+from features import normalize_text
+
+def main() -> None:
+    print(normalize_text("  hello   model  "))
+
+if __name__ == "__main__":
+    main()
+```
+
+从项目根目录运行 `python prepare.py` 会输出 `hello model`；当它属于包时，更稳定的方式是 `python -m package.prepare`，因为解释器会按包的导入路径加载模块，而不是依赖当前脚本目录的偶然行为。
+
+## 运行验证：输入、输出和返回契约
+
+为每个函数准备至少三个输入：正常值、空值或边界值、错误值。调用后打印 `repr(result)` 和结果类型，确认 `None` 不是空列表，确认原输入是否保持不变。命令行可以运行 `python functions_demo.py`，模块可以运行 `python -m package.prepare`；若依赖的是当前虚拟环境，先打印 `sys.executable`。真正的自动化验证会在下一节测试课程中完成，但现在就应让函数的输入、输出、异常和副作用可以被观察。
+
+## 常见错误与排错路径
+
+- 可变默认参数：如果第二次调用看到了第一次的标签，搜索签名里的 `=[]`、`={}`，改成 `None` 哨兵并在函数内初始化。
+- 忘记 `return`：调用结果为 `None` 时，先检查所有分支是否都返回；不要在调用处盲目写 `or []` 掩盖缺失结果。
+- 类型提示当成转换器：打印输入的 `type`，在 JSON 边界执行 `float`、`int` 或字符串校验，并保留原始字段上下文。
+- 参数顺序错误：把 `timeout`、`limit` 等参数改成 keyword-only，调用时写 `timeout=5`，不要依赖位置记忆。
+- `NameError` 或循环导入：先运行 `python -c "import module; print(module.__file__)"`，确认加载的是当前文件，再检查依赖方向和拼写。
+- 导入就启动副作用：把训练、网络和命令行动作放入 `main()`，并用 `if __name__ == "__main__":` 保护。
+- `**kwargs` 吞掉错误：对允许的键建立集合，遇到未知选项主动抛出 `TypeError`，否则模型服务的配置拼写错了也可能静默失效。
+
+## 练习：写一个可复用的清洗函数
+
+实现 `mean_score(values)`：接受任意可迭代的数字，返回保留两位小数的平均值；空输入返回 `None`；某一项无法转换为 `float` 时抛出包含原值的可读 `ValueError`。给函数写返回类型提示，并用列表、元组和生成器各调用一次。
+
+<KeyIdea title="类型提示是团队共享的契约">
+  <p>提示让工具理解代码，校验让运行时相信数据。二者都服务于边界清晰的函数，不能用其中一个替代另一个；输入来源越不可信，运行时校验越应该靠近入口。</p>
+</KeyIdea>
+
+### 提示
+
+先逐项转换，而不是直接对原始值求和；捕获 `TypeError` 和 `ValueError` 时，把导致失败的值放进新异常消息。空列表在除法之前处理。生成器只能消费一次，因此不要在函数里先把它遍历来打印、再试图第二次求平均。
+
+### 完整答案
+
+<Exercise
+  title="函数、模块与类型提示练习"
+  prompt="实现 mean_score(values: Iterable[float]) -> float | None，空输入返回 None；遇到无法转换为 float 的值时抛出包含原值的 ValueError。"
+  hint="不要用可变列表作为默认参数；逐项转换并保留失败值，再判断结果是否为空。"
+  solution={`from collections.abc import Iterable
+
+def mean_score(values: Iterable[float]) -> float | None:
+    numbers = []
+    for value in values:
+        try:
+            numbers.append(float(value))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"score is not numeric: {value!r}") from exc
+    return round(sum(numbers) / len(numbers), 2) if numbers else None`}
+/>
+
+<SolutionReveal>
+  <p>运行结果应包括 [1, 2] 得到 1.5、[] 得到 None、生成器得到正确平均值，以及坏字符串触发包含原值的 ValueError。下一节会把类似的返回契约放进 dataclass，但函数仍然是最小、最容易隔离的测试单位。</p>
+</SolutionReveal>
+
+## 与后续 AI 数据工程的连接
+
+数据准备函数可以把“解析一行”“规范化文本”“截断特征”“计算批次指标”拆开，模型服务则把“校验请求”“调用模型”“格式化响应”拆开。类型提示帮助队友知道输入形状，`None` 让缺失预测与零分数区分开，`*args/**kwargs` 可用于有限的服务选项，模块边界让训练脚本和线上服务共享纯函数而不共享启动副作用。函数越小，后续 pytest、模型替身和指标回归越容易写。
+
+## 小结
+
+迁移函数时要同时确认参数语义、返回值、异常和副作用。`def` 创建可复用边界，`None` 是需要处理的结果，默认参数要防共享状态，类型提示不是运行时验证，模块导入必须可安全复用。把这些约定写进函数后，AI 数据和模型服务才有稳定的接口。

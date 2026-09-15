@@ -1,0 +1,141 @@
+---
+id: cpp-algorithms
+slug: algorithms-lambdas-and-callables
+title: "算法、Lambda 与可调用对象"
+summary: "把数组 map/filter 经验迁移到 STL 算法、Lambda 和明确的迭代器边界。"
+track: cpp
+order: 7
+durationMinutes: 16
+concepts: [algorithms, lambda, callables]
+prerequisites: [cpp-stl]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+本节结束时，你能把 JS/TS 的 map、filter、reduce、sort 迁移为 STL algorithm；能解释 lambda 的参数、返回类型和 capture；能选择 predicate、projection 或普通函数，并检查迭代器范围、修改规则、复杂度和失效风险。你还会为一个传感器过滤管线写可验证的输出。
+
+## 从高阶数组方法到迭代器范围
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'values.map((x) => x * 1000)'} targetLabel="C++" targetLanguage="cpp" target={'std::transform(values.begin(), values.end(), out, convert)'} />
+
+JS 的 array.filter(callback) 把容器和回调绑在一起；C++ 的 std::copy_if 接收 first 和 last 两个迭代器以及 predicate。范围是半开区间 [begin, end)，end 不指向元素，这种设计可以自然表示空范围并避免额外的长度参数。
+
+反例是把 lambda 当成“匿名函数语法糖”就结束：capture 决定它是否保存外部对象，按引用捕获可能在异步任务中悬空，按值捕获又可能复制大缓冲。还要注意 std::remove 不会真正缩短 vector，必须配合 erase。
+
+## 示例一：filter 与 copy_if
+
+~~~cpp
+#include <algorithm>
+#include <iostream>
+#include <vector>
+
+int main() {
+  const std::vector<double> ranges{0.1, 0.8, 6.0, 1.2};
+  std::vector<double> usable;
+  std::copy_if(ranges.begin(), ranges.end(), std::back_inserter(usable),
+    [](const double range_m) {
+      return range_m >= 0.2 && range_m <= 5.0;
+    });
+
+  for (const double value : usable) std::cout << value << " ";
+}
+~~~
+
+编译运行后输出 0.8 1.2。copy_if 不修改输入，back_inserter 通过 push_back 写入输出；如果已知输出大小，可以 reserve 减少分配。验证时加上空 vector、全无效和全有效三组输入，确认算法的边界是闭区间还是开区间。
+
+## 示例二：transform 与 reduce
+
+~~~cpp
+#include <numeric>
+#include <vector>
+
+std::vector<double> to_millimeters(const std::vector<double>& meters) {
+  std::vector<double> result;
+  result.reserve(meters.size());
+  std::transform(meters.begin(), meters.end(), std::back_inserter(result),
+    [](const double value_m) { return value_m * 1000.0; });
+  return result;
+}
+
+double sum(const std::vector<double>& values) {
+  return std::accumulate(values.begin(), values.end(), 0.0);
+}
+~~~
+
+transform 产生新序列，accumulate 使用 0.0 作为初值让累加在 double 上进行。若初值写成 0，某些类型会在整数语义上累加，结果或性能可能不符合预期。运行验证时对两个样本 0.8、1.2 应得到 800、1200 和 2.0，并检查空输入返回 0.0。
+
+## 示例三：sort、比较器与稳定性
+
+~~~cpp
+#include <algorithm>
+#include <iostream>
+#include <vector>
+
+struct Reading {
+  double range_m;
+  int sequence;
+};
+
+int main() {
+  std::vector<Reading> readings{{1.2, 2}, {0.8, 1}, {1.2, 3}};
+  std::stable_sort(readings.begin(), readings.end(),
+    [](const Reading& left, const Reading& right) {
+      return left.range_m < right.range_m;
+    });
+  for (const auto& reading : readings) {
+    std::cout << reading.range_m << ":" << reading.sequence << " ";
+  }
+}
+~~~
+
+stable_sort 保留相等距离的原始顺序，因此输出是 0.8:1 1.2:2 1.2:3。比较器必须建立严格弱序：不能在相等时返回 true，也不要读取会变化的外部状态。机器人日志按时间或距离排序时，稳定性可能影响重放结果，应该写进测试而不是凭感觉。
+
+## lambda 的 capture 规则
+
+[] 不捕获外部变量；[threshold] 按值保存 threshold；[&threshold] 按引用借用它；[=] 和 [&] 是批量捕获，初学和生产代码都应谨慎。局部 lambda 立即执行一般安全，保存到线程任务或回调时必须确认捕获对象的生命周期。捕获 this 也不代表对象一定活着，异步回调通常需要显式所有权方案。
+
+## erase-remove 与迭代器边界
+
+~~~cpp
+std::vector<double> values{0.1, 0.8, 0.2, 6.0};
+const auto new_end = std::remove_if(values.begin(), values.end(),
+  [](const double value) { return value < 0.2 || value > 5.0; });
+values.erase(new_end, values.end());
+~~~
+
+remove_if 重新排列保留元素并返回新的逻辑 end，vector 的 size 在 erase 前没有变化。验证后 values 只有 0.8 和 0.2。直接使用 remove 的返回值当 size 是错误的；用下标遍历旧长度也会读到被移到尾部的未定义语义区域。
+
+## 编译、运行与排错
+
+使用 c++ -std=c++20 -Wall -Wextra -Wpedantic -Wshadow 编译。若算法找不到，检查是否 include algorithm 或 numeric 头文件；若 lambda 无法修改结果，检查 capture 是否为 const 值；若结果多一项，检查 end 是否重复处理；若崩溃发生在异步回调，优先检查引用捕获的生命周期。用小数组打印输入和输出，再用 sanitizer 检查越界，最后才进行性能优化。
+
+## 机器人连接：过滤和降采样管线
+
+一帧激光数据可以先 copy_if 去掉非法值，再 transform 做单位变换，最后 accumulate 计算统计量。对于控制周期，算法是否分配内存、是否稳定排序、是否线性扫描都要被记录。消息时间戳和 sequence 应随数据一起传递，否则过滤后无法判断旧数据是否覆盖新数据。
+
+<KeyIdea title="算法表达意图，lambda 规定局部规则">
+  <p>把范围、predicate、输出和复杂度一起读，才能真正理解 STL 算法。lambda 很短，但 capture 和迭代器有效性决定它是否安全。</p>
+</KeyIdea>
+
+## 动手练习
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'values.filter(isUsable)'} targetLabel="C++" targetLanguage="cpp" target={'std::copy_if(values.begin(), values.end(), out, is_usable)'} />
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'values.reduce((sum, value) => sum + value, 0)'} targetLabel="C++" targetLanguage="cpp" target={'std::accumulate(values.begin(), values.end(), 0.0)'} />
+
+实现一个处理管线：从原始距离中筛选 0.2 到 5.0 的值，转换成毫米，按从小到大排序，并输出有效数量与总和。要求输入保持不变，空输入不能除零，写出一组包含 NaN 或越界值的验证数据。
+
+<Exercise title="把 filter map reduce 迁移成 STL" prompt="用 copy_if、transform 和 accumulate 完成同一帧数据的过滤、单位变换和求和，说明每一步的输入输出容器和时间复杂度。" hint="copy_if 的 predicate 只读取；transform 的输出先 reserve；accumulate 初值使用 0.0。" solution="先 copy_if 得到 usable，再 transform 生成 millimeters，最后 accumulate 求和；三步总复杂度为线性，额外空间与有效样本数成正比。" />
+
+## 小结与下一步
+
+<SolutionReveal>
+  <p>打开答案后，请把示例改成自己的传感器数据，再用编译器、运行输出和边界输入验证，而不是只对照文字。</p>
+</SolutionReveal>
+
+你已经把 JS/TS 的高阶数组操作迁移为 C++ 的迭代器算法，并理解了 capture、半开区间和 erase-remove。下一节进入 RAII：这些算法创建的 vector、文件和锁如何在作用域结束时自动释放，避免机器人节点泄漏资源。

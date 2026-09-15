@@ -1,0 +1,77 @@
+---
+id: common-concurrency
+slug: async-concurrency-and-engineering
+title: "异步、并发与工程习惯"
+summary: "从 Promise 和 event loop 出发，建立对线程、任务和资源生命周期的直觉。"
+track: common
+order: 4
+durationMinutes: 12
+concepts: [async, concurrency, testing]
+prerequisites: [common-functions]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## `async` 不是“自动变快”
+
+在 JS 中，`async/await` 让当前函数在 Promise 未完成时把控制权交回 event loop；它不会让同步计算突然获得第二个 CPU。Python 的 `asyncio` 有相同的协作式特征，协程只有在 `await` 处让出执行权；C++ 的 `std::thread`、任务库或执行器则可能真的并行执行，需要更明确地管理线程安全、取消和对象生命周期。
+
+迁移前先画任务依赖：读取两个独立文件可以同时等待，依赖第一个结果的请求不能提前启动，汇总必须等两者完成。还要问资源何时释放、一个任务失败时其他任务是否取消、结果是否有顺序要求。AI 推理常是 CPU/GPU 密集，机器人回调还受截止时间约束，这些工程条件比关键字更重要。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const response = await fetch(url);
+const payload = await response.json();`}
+  targetLabel="Python"
+  targetLanguage="python"
+  target={`async with client.get(url) as response:
+    payload = await response.json()`}
+/>
+
+### 用工程问题而不是关键字做判断
+
+如果工作主要等待网络或磁盘，异步能让一个线程服务更多连接；如果工作主要计算，必须考虑进程、线程池、原生库或 GPU。并发请求也要设置上限，否则 `Promise.all`、`gather` 或无限任务提交会把连接池和内存耗尽。对机器人控制环，宁可丢弃过期传感器帧，也不要让旧任务排队到影响下一次控制。
+
+```typescript
+const limit = 4;
+const results: Result[] = [];
+for (let i = 0; i < urls.length; i += limit) {
+  const batch = urls.slice(i, i + limit);
+  results.push(...await Promise.all(batch.map(fetchJson)));
+}
+```
+
+### 错误传播、取消与清理
+
+`await` 会把 Promise 的拒绝重新抛给调用方，但并不会自动取消已经发出的请求。Python 任务取消时要在 `finally` 关闭客户端，C++ 线程通常不能被强行杀死，应通过停止标志、队列关闭或 token 协作退出。测试时使用短超时和可控 fake，不要让网络偶发性决定测试是否通过。
+
+做一个最小并发实验很有帮助：先用一个任务确认结果和错误，再把两个独立任务同时启动，最后逐步加入并发上限、超时和取消。每次只改变一个变量，记录总耗时、完成数和未完成数。这样可以把“并发代码偶尔出错”拆成可观察的调度、资源或清理问题。
+
+### 常见错误与排错思路
+
+最典型的问题是忘记 `await`，把 Promise/Task 当成数据继续传递；其次是在 async 函数里调用大段同步计算，导致 event loop 卡顿。排错时打印任务创建、开始、完成和取消时间，检查队列长度和每项耗时；若 C++ 出现偶发崩溃，先用线程 sanitizer 或缩小共享状态，再检查线程是否仍访问已销毁对象。
+
+<KeyIdea title="先区分等待和并行">
+  <p><strong>等待</strong>是当前任务暂时没有结果，<strong>并行</strong>是多个任务同时占用资源。迁移时先画依赖关系，再决定串行、协程还是线程，并明确上限与取消。</p>
+</KeyIdea>
+
+### 一个可控的并发实验
+
+先用一个固定的 fake 请求测出串行基线，再用两个、四个任务逐步增加并发。每次记录完成顺序、总耗时、最大同时任务数和取消后的清理结果。这个小实验能把“快了一点”变成可检查的证据，也能在进入线程池或机器人执行器前暴露任务依赖问题。
+
+## 迁移练习
+
+<Exercise
+  title="找出可以并发的任务"
+  prompt="实现一个最多同时请求 4 个 URL 的小函数，并为一个请求失败、调用方取消、结果仍需按输入顺序返回写出处理策略。再标出哪些步骤是等待，哪些步骤是计算。"
+  hint="只有互相不依赖的工作才适合同时开始；限制并发数，并把取消和清理写进 finally/RAII。"
+  solution={`用批次或有界信号量限制 4 个任务；保留输入索引即可按原顺序收集。失败时取消尚未开始的任务并等待已开始任务清理资源，网络等待用 async，重计算另行放入线程或进程执行。`}
+/>
+
+<SolutionReveal>
+  <p>从 JS/TS 迁移到 Python/C++，并发的难点不在 API 名字，而在显式处理任务依赖、错误传播、取消、背压和资源生命周期。</p>
+</SolutionReveal>

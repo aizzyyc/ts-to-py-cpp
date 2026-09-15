@@ -1,0 +1,40 @@
+---
+import { getCollection, render } from "astro:content";
+import BaseLayout from "../../../layouts/BaseLayout.astro";
+import LessonNav from "../../../components/LessonNav.astro";
+import RouteSidebar from "../../../components/RouteSidebar.astro";
+import LessonResources from "../../../components/LessonResources.astro";
+import { LESSONS, TRACK_LABELS, type Track } from "../../../lib/lessons";
+
+export async function getStaticPaths() {
+  const entries = await getCollection("lessons");
+  return entries.map((entry) => ({
+    params: { track: entry.data.track, slug: entry.data.slug },
+    props: { entry },
+  }));
+}
+
+const { entry } = Astro.props;
+const { Content } = await render(entry);
+const current = LESSONS.find((lesson) => lesson.id === entry.data.id);
+if (!current) throw new Error(`Lesson metadata missing for ${entry.data.id}`);
+const sameTrack = LESSONS.filter((lesson) => lesson.track === current.track).sort((a, b) => a.order - b.order);
+const previous = sameTrack.find((lesson) => lesson.order === current.order - 1);
+const next = sameTrack.find((lesson) => lesson.order === current.order + 1);
+---
+
+<BaseLayout title={`${entry.data.title} · LangShift`} description={entry.data.summary}>
+  <section class="lesson-page" data-current-track={entry.data.track}>
+    <div class="page-container lesson-layout">
+      <RouteSidebar lessons={LESSONS} currentTrack={entry.data.track as Track} currentLessonId={entry.data.id} />
+      <article class="lesson-main">
+        <nav class="lesson-breadcrumb" aria-label="面包屑导航"><a href="/learn">学习路线</a><span>/</span><a href={`/learn#${entry.data.track}`}>{TRACK_LABELS[entry.data.track]}</a><span>/</span><span>{String(entry.data.order).padStart(2, "0")}</span></nav>
+        <header class="lesson-header"><span class="eyebrow">{TRACK_LABELS[entry.data.track]} · LESSON {String(entry.data.order).padStart(2, "0")}</span><h1>{entry.data.title}</h1><p class="lesson-summary">{entry.data.summary}</p><div class="lesson-meta"><span>{entry.data.durationMinutes} 分钟</span><span>{entry.data.concepts.join(" · ")}</span></div></header>
+        <div class="lesson-content"><Content /></div>
+        {(entry.data.track === "python" || entry.data.track === "cpp") && <LessonResources lessonId={entry.data.id} track={entry.data.track} />}
+        <LessonNav currentLessonId={entry.data.id} previous={previous} next={next} />
+      </article>
+      <aside class="lesson-aside" aria-label="本节概览"><span class="aside-label">IN THIS LESSON</span><ul class="aside-list"><li class="active">核心概念</li><li>代码对照</li><li>小练习</li><li>迁移结论</li></ul></aside>
+    </div>
+  </section>
+</BaseLayout>

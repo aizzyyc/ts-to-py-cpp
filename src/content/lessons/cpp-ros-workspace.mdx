@@ -1,0 +1,120 @@
+---
+id: cpp-ros-workspace
+slug: ros2-workspaces-colcon-and-packages
+title: "ROS 2 工作区、colcon 与包"
+summary: "从 CMake 项目进入 ROS 2 工作区，理解 package、colcon 和依赖声明。"
+track: cpp
+order: 24
+durationMinutes: 18
+concepts: [ros2, colcon, packages]
+prerequisites: [cpp-networking]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## ROS 2 工作区、colcon 与包
+
+从普通 CMake 项目进入 ROS 2，新增的是 package manifest、ament 约定、colcon 构建顺序和 shell overlay。`package.xml` 说明别人需要什么，`CMakeLists.txt` 说明 target 如何编译，`install` 空间则提供运行时找到的可执行文件、库和资源。把这三层混在一起，常见结果是“能在当前终端运行，换一个终端就找不到”。
+
+### 包是构建和运行边界
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`{"scripts": {"build": "cmake --build build", "start": "node app.js"}}
+// node_modules 负责依赖可见性`}
+  targetLabel="C++ / ROS 2"
+  targetLanguage="cpp"
+  target={`ros2 pkg create --build-type ament_cmake sensor_app
+colcon build --symlink-install --packages-select sensor_app
+source install/setup.bash`}
+/>
+
+工作区可以包含多个互相依赖的包，colcon 会按依赖拓扑安排构建。`--packages-up-to` 适合只构建一个节点及其依赖，`--symlink-install` 便于修改 Python/资源文件，但 C++ 二进制仍需重新编译。source overlay 时要留意顺序：错误的旧工作区可能让你运行到另一份同名包。
+
+### package.xml 与 CMake 的一对一关系
+
+```xml
+<package format="3">
+  <name>sensor_app</name>
+  <version>0.1.0</version>
+  <description>Range sensor node</description>
+  <maintainer email="robot@example.com">robot</maintainer>
+  <license>Apache-2.0</license>
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>
+```
+
+对应的 CMake 要 `find_package(rclcpp REQUIRED)`，把源文件加入一个命名 target，再用 `ament_target_dependencies(sensor_node rclcpp sensor_msgs)`，最后 `install(TARGETS sensor_node DESTINATION lib/${PROJECT_NAME})`。只改 CMake 不改 manifest 会让二进制机器缺依赖；只改 manifest 不改 CMake 则编译器仍然看不到头文件。
+
+### 环境、资源和构建顺序
+
+新终端运行节点前 source ROS 发行版和工作区 install。出现旧代码时，打印 `ros2 pkg prefix sensor_app`、`which`/`Get-Command` 找到的可执行文件和 `AMENT_PREFIX_PATH`。资源文件、launch、URDF 也要 install，否则源码目录存在不代表安装空间存在。先构建接口包，再构建依赖它的节点包；colcon 能安排顺序，但包声明必须完整。
+
+### 常见编译、链接、运行时错误
+
+`Package 'x' not found` 先检查 source 和 `rosdep`/安装依赖；头文件找不到看 `find_package` 与 ament target；undefined reference 看 target 是否真正调用 ament 依赖。节点启动后找不到参数/launch/模型，查 install 规则和当前 overlay。混用不同 ROS 发行版或 Debug/Release 库可能导致 ABI 崩溃，先清理对应 build/install/log 空间并重新 configure，而不是随意复制库文件。
+
+### 学习目标
+
+完成本节后，你能创建 `ament_cmake` 包；解释 `package.xml`、CMake target、install space 和 overlay；用 `colcon` 按依赖构建；安装节点、launch 和配置资源；定位包、头文件、旧 overlay 与 ABI 不一致问题。
+
+### 从创建到运行的验证链
+
+```bash
+mkdir -p ~/robot_ws/src
+cd ~/robot_ws/src
+ros2 pkg create --build-type ament_cmake sensor_app --dependencies rclcpp sensor_msgs
+cd ..
+colcon build --symlink-install --packages-select sensor_app
+source install/setup.bash
+ros2 pkg prefix sensor_app
+```
+
+prefix 应指向当前工作区的 `install/sensor_app`。新终端必须重新 source ROS 发行版和工作区；如果同名包来自旧路径，先看 `ros2 pkg prefix`，不要用“能启动”证明运行的是最新代码。
+
+### 可安装的节点与资源
+
+```cmake
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+add_executable(range_node src/range_node.cpp)
+ament_target_dependencies(range_node rclcpp)
+install(TARGETS range_node DESTINATION lib/${PROJECT_NAME})
+install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
+ament_package()
+```
+
+只写源码路径而不写 install，会导致 launch、YAML、URDF 在安装空间缺失。验证方法是从 `install` 运行，并临时改名源码资源；若仍可运行，说明安装规则真正完整。
+
+### JS/TS 迁移的工作区反例
+
+`node_modules` 的体验不能直接类比 ROS overlay；source 工作区会改变运行时搜索路径。`--symlink-install` 便于资源开发，却不会让 C++ 源码免编译。依赖必须同时出现在 manifest 与 CMake，构建机器、部署机器和 IDE 才能得到同一张依赖图。
+
+### 机器人包的集成验收
+
+在干净终端记录 `ROS_DISTRO`、`ros2 pkg prefix`、节点启动时间和资源路径；再用 `ros2 topic list/echo` 验证消息连接，最后接入真实传感器。区分构建失败、overlay 错误、QoS/接口错误和驱动错误，避免把“节点进程存在”当作 ROS 2 集成完成。
+
+<KeyIdea title="ROS 2 的命令背后是三层契约">
+  <p>package.xml 管依赖声明，CMake target 管编译链接，install/overlay 管运行时可见性。每层都能独立排错，构建顺序才不会靠记忆。</p>
+</KeyIdea>
+
+## 迁移练习
+
+创建 `sensor_app` ament_cmake 包，加入一个 `rclcpp` 可执行节点和一个资源文件。分别在干净终端、已 source 旧 overlay 的终端运行 `ros2 pkg prefix` 和节点，记录差异；再用 `colcon build --packages-up-to sensor_app` 验证依赖顺序。
+
+<Exercise
+  title="把 CMake 项目装进 ROS 2 工作区"
+  prompt="写出 package.xml、CMake target、ament 依赖和 install 规则；解释如何定位包找不到、头文件找不到和运行资源找不到三类问题。"
+  hint="依赖必须同时出现在 manifest 与 CMake；运行资源要显式 install；先确认当前终端的 overlay。"
+  solution={`声明 rclcpp 与所需消息包，CMake find_package 后用 ament_target_dependencies；add_executable 后 install(TARGETS ...)，资源用 install(DIRECTORY launch config DESTINATION share/package_name)。用 ros2 pkg prefix 和环境变量确认实际使用的 overlay。`}
+/>
+
+<SolutionReveal>
+  <p>工作区问题通常不是“colcon 很玄学”，而是声明、target 和 overlay 三层信息不一致。下一节会在这个可复现的包边界上编写 Node、Topic 和 QoS。</p>
+</SolutionReveal>

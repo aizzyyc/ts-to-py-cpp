@@ -1,0 +1,248 @@
+---
+id: python-pytorch-data
+slug: pytorch-datasets-and-dataloaders
+title: "Dataset、DataLoader 与批处理"
+summary: "把样本读取、变换、batch 和 worker 组织成稳定的数据输入管线。"
+track: python
+order: 25
+durationMinutes: 18
+concepts: [dataset, dataloader, batching]
+prerequisites: [python-pytorch-models]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+本节完成后，你能够把原始 AI 记录组织成稳定的 Dataset 和 DataLoader。你将会：
+
+- 区分 Dataset 的样本语义与 DataLoader 的 batch、shuffle、worker 责任。
+- 处理变长输入的 collate、padding、length 和标签 dtype。
+- 让数据加载速度、内存、pin memory、worker 数量与模型 device 匹配。
+- 用 batch shape、样本数、顺序、随机 seed 和耗时验证输入管线。
+
+## 从 JS/TS 迁移的心智模型
+
+前端开发者熟悉分页、数组切片和异步迭代器。PyTorch 把“如何取一条样本”和“如何组成批次”分开。Dataset 定义索引到样本的映射，DataLoader 决定顺序、batch size、worker 和 collate。对于 AI，输入不只是对象数组，还要变成统一的 Tensor shape、dtype 和 device。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`for (const batch of batches(samples, 32)) {
+  await trainStep(batch);
+}`}
+  targetLabel="Python / PyTorch"
+  targetLanguage="python"
+  target={`loader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=collate)
+for batch in loader:
+    train_step(batch)`}
+/>
+
+<KeyIdea title="DataLoader 决定模型实际看到的样本">
+  <p>batch size、shuffle、padding 和 worker 的选择会影响梯度、吞吐、显存和复现。数据管线不是训练循环外的无关细节。</p>
+</KeyIdea>
+
+## Dataset：一条样本的边界
+
+Dataset 至少实现 __len__ 和 __getitem__。__getitem__(index) 应返回一个完整且可解释的样本，例如 token_ids、长度、label、sample_id；它不应依赖上一次调用留下的全局状态。把文件读取、解码、裁剪或 tokenizer 放在这里时，要考虑随机性和失败行为。训练集可以做随机增强，validation/test 应关闭会改变结果的增强。
+
+样本的 shape 可以不同：文本 token 数、音频帧数和图像尺寸经常变长。Dataset 不应偷偷把它们截断到一个未记录的长度；由配置决定 max_length、padding 策略和是否保留 length。分类标签通常返回 long Tensor，回归标签则是 float32，二者要和 loss 对齐。
+
+### 示例一：定义一个可审计的 AI Dataset
+
+```python
+import torch
+from torch.utils.data import Dataset
+
+class EventDataset(Dataset):
+    def __init__(self, records, max_length=8):
+        self.records = list(records)
+        self.max_length = max_length
+
+    def __len__(self):
+        return len(self.records)
+
+    def __getitem__(self, index):
+        record = self.records[index]
+        token_ids = torch.tensor(record["token_ids"][: self.max_length], dtype=torch.long)
+        label = int(record["label"])
+        if token_ids.numel() == 0:
+            raise ValueError(f"empty token sequence at index {index}")
+        return {
+            "tokens": token_ids,
+            "label": torch.tensor(label, dtype=torch.long),
+            "sample_id": record["sample_id"],
+        }
+
+records = [
+    {"sample_id": "a", "token_ids": [4, 8, 3], "label": 1},
+    {"sample_id": "b", "token_ids": [5, 2], "label": 0},
+]
+dataset = EventDataset(records)
+print(len(dataset), dataset[0]["tokens"].shape, dataset[0]["label"].dtype)
+```
+
+输出类似 2、torch.Size([3])、torch.int64。sample_id 方便错误样本回溯，但不应直接送进模型。若 tokenizer、音频读取或图像解码失败，异常应包含 index 和 sample_id；不要返回一个全零样本让训练继续而不记录，因为这会伪造数据质量。
+
+## DataLoader、shuffle 与 batch
+
+DataLoader 负责取样、组成 batch 和可选并行。训练通常 shuffle=True，validation/test 通常 shuffle=False 以便结果顺序稳定；如果使用 DistributedSampler，shuffle 由 sampler 管理，不能两处同时猜。drop_last=True 会丢掉最后不完整 batch，可能改变稀有标签比例；只在 BatchNorm、固定 batch 或吞吐需求确实要求时使用，并记录丢弃样本数。
+
+batch size 是优化行为和资源预算的一部分。更大的 batch 提高吞吐但增加显存，可能改变梯度噪声；显存不足不应只捕获异常后静默减小 batch，因为实验结果已改变。用梯度累积模拟大 batch 时记录 accumulation steps 和有效 batch size。
+
+### 示例二：用 collate 处理变长序列
+
+```python
+from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import DataLoader
+
+def collate_events(samples):
+    tokens = [sample["tokens"] for sample in samples]
+    labels = torch.stack([sample["label"] for sample in samples]).long()
+    lengths = torch.tensor([len(item) for item in tokens], dtype=torch.long)
+    padded = pad_sequence(tokens, batch_first=True, padding_value=0)
+    return {
+        "tokens": padded,
+        "lengths": lengths,
+        "labels": labels,
+        "sample_ids": [sample["sample_id"] for sample in samples],
+    }
+
+loader = DataLoader(
+    dataset, batch_size=2, shuffle=False,
+    collate_fn=collate_events, num_workers=0,
+)
+batch = next(iter(loader))
+print(batch["tokens"].shape, batch["lengths"].tolist(), batch["labels"].shape)
+```
+
+输出应是 tokens shape (2, 3)、lengths [3, 2]、labels shape (2,)。padding 是输入契约的一部分：模型必须使用 lengths 或 attention mask 忽略 0，不然短样本会把 padding 当真实词。collate 中不要把 sample_id 转成 GPU Tensor；它只用于日志和错误回溯。
+
+## worker、device 与吞吐
+
+num_workers=0 最容易调试；增加 worker 可以把磁盘读取和 CPU 预处理与 GPU 计算重叠，但会增加进程、内存和 Windows spawn 的启动成本。Windows 入口要使用 if __name__ == "__main__" 保护，Dataset 对象需要能被序列化。persistent_workers 适合长训练，短命令可能反而增加等待。
+
+pin_memory=True 只对 CPU Tensor 的异步拷贝有帮助，通常与 CUDA 和 non_blocking=True 配合；它不是让数据自动进入 GPU。先测量 data_wait_ms、host_to_device_ms、step_ms、GPU 利用率和内存，再决定 worker 数。文件句柄、随机增强器和缓存也要按 worker 计算资源。
+
+### 示例三：把 batch 送到同一 device
+
+```python
+def move_batch(batch, device):
+    moved = {}
+    for key, value in batch.items():
+        moved[key] = value.to(device, non_blocking=True) if torch.is_tensor(value) else value
+    if moved["tokens"].ndim != 2:
+        raise ValueError("tokens must be (batch, time)")
+    if moved["labels"].shape != (moved["tokens"].shape[0],):
+        raise ValueError("labels must be (batch,)")
+    if moved["lengths"].max().item() > moved["tokens"].shape[1]:
+        raise ValueError("sequence length exceeds padded width")
+    return moved
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+ready = move_batch(batch, device)
+print({key: (tuple(value.shape), str(value.device))
+       for key, value in ready.items() if torch.is_tensor(value)})
+```
+
+运行输出会列出 tokens、lengths、labels 的 shape 和相同 device。若模型参数在 cuda 而 batch 在 cpu，就会出现 device mismatch；统一移动位置比在 Module 内到处调用 to 更容易审计。变长 batch 还要验证 length 不超过 padded 宽度，防止 collate 的错误被 attention 代码放大。
+
+## 运行、输出与验证
+
+每次训练前先用一批数据做 smoke test：检查样本数、batch shape、dtype、label 范围、sample_id 顺序和加载耗时。一个可观察的检查可以是：
+
+```python
+first = next(iter(loader))
+print({
+    "dataset_size": len(dataset),
+    "batch_size": int(first["labels"].shape[0]),
+    "tokens_shape": tuple(first["tokens"].shape),
+    "tokens_dtype": str(first["tokens"].dtype),
+    "labels_dtype": str(first["labels"].dtype),
+    "lengths": first["lengths"].tolist(),
+    "sample_ids": first["sample_ids"],
+})
+assert first["tokens"].dtype == torch.long
+assert first["labels"].dtype == torch.long
+assert first["tokens"].shape[0] == first["labels"].shape[0]
+```
+
+固定 seed 后重复创建 loader，shuffle=True 时应比较同一版本下的 sample_id 顺序；多 worker 还要设置 worker_init_fn 和 generator，并记录 PyTorch 版本。验证集应能顺序复现，测试集不应因为 worker 随机增强而改变内容。空 Dataset、坏样本和最后不完整 batch 都要有明确结果。
+
+## 常见错误、排错与调试
+
+- default_collate 无法堆叠：检查样本 shape 是否变长，为序列提供 collate_fn，而不是随便截断或填零。
+- labels shape 多一个维度：打印每个 sample 的 label shape，使用 stack 后确认是 batch，不要让 loss 自己 squeeze。
+- 训练 GPU 等待数据：比较 data_wait_ms 和 step_ms，增加 worker、预取或缓存前先看内存和句柄。
+- 多 worker 只在 Windows 失败：加 main 保护，确认 Dataset 可序列化，先回退 num_workers=0 最小复现。
+- 每次结果不同：固定 DataLoader generator、worker seed、shuffle 顺序和增强参数；保存 sample_id 顺序。
+- loss 不变：抽一条 sample 直接调用 Dataset，检查 tokenizer、label、padding mask 和 dtype。
+- 训练变慢或 OOM：测量 batch、pin memory、prefetch、worker RSS 和 GPU 显存，不能把 num_workers 无限加大。
+
+## 练习与任务
+
+实现一个变长事件 Dataset、collate_events 和 DataLoader：每个样本含 sample_id、token_ids、label；padding 到批次内最大长度，返回 lengths 和 labels；训练 loader 打乱，验证 loader 保序。写 smoke_test，输出 batch shape、dtype、device、sample_id 和一批加载耗时。
+
+<Exercise
+  title="Dataset 与 DataLoader 练习"
+  prompt="完成 EventDataset、collate_events、move_batch 和 smoke_test；覆盖空序列、不同长度、错误 label、空数据集、num_workers=0 与可用 CUDA。"
+  hint="Dataset 只负责一条样本；collate 负责 pad_sequence；labels 使用 torch.long；先在 CPU 验证，再移动到 device。"
+  solution={`def collate_events(samples):
+    tokens = [item["tokens"] for item in samples]
+    labels = torch.stack([item["label"] for item in samples]).long()
+    lengths = torch.tensor([len(item) for item in tokens], dtype=torch.long)
+    return {"tokens": pad_sequence(tokens, batch_first=True),
+            "lengths": lengths, "labels": labels,
+            "sample_ids": [item["sample_id"] for item in samples]}`}
+/>
+
+### 完整答案
+
+```python
+def collate_events(samples):
+    if not samples:
+        raise ValueError("cannot collate an empty list")
+    tokens = [sample["tokens"] for sample in samples]
+    if any(item.ndim != 1 or item.numel() == 0 for item in tokens):
+        raise ValueError("every token sequence must be non-empty and one-dimensional")
+    labels = torch.stack([sample["label"] for sample in samples]).to(torch.long)
+    lengths = torch.tensor([item.numel() for item in tokens], dtype=torch.long)
+    padded = pad_sequence(tokens, batch_first=True, padding_value=0)
+    return {
+        "tokens": padded,
+        "lengths": lengths,
+        "labels": labels,
+        "sample_ids": [sample["sample_id"] for sample in samples],
+    }
+
+def smoke_test(loader, device):
+    batch = next(iter(loader))
+    if batch["tokens"].ndim != 2:
+        raise ValueError("expected tokens shape (batch, time)")
+    if batch["labels"].shape != (batch["tokens"].shape[0],):
+        raise ValueError("label batch mismatch")
+    moved = move_batch(batch, device)
+    return {
+        "tokens": tuple(moved["tokens"].shape),
+        "labels": tuple(moved["labels"].shape),
+        "device": str(moved["tokens"].device),
+        "sample_ids": moved["sample_ids"],
+    }
+```
+
+用三条长度不同的正常记录、空序列和错误标签分别运行，观察错误是否包含样本身份；再用训练和验证 loader 比较顺序、最后 batch 和总样本数。只有当输入管线的输出可重复，模型 loss 的变化才值得解释。
+
+<SolutionReveal>
+  <p>DataLoader 的验收证据同时包含内容和资源：batch shape、label dtype、sample_id、device、加载耗时和内存。把这些信息接到训练日志，数据问题就不会伪装成模型问题。</p>
+</SolutionReveal>
+
+## 与同一 AI 项目主线的连接
+
+pandas/NumPy 负责字段和特征矩阵，Dataset 负责一条样本，collate 负责变长表示，DataLoader 负责批次和吞吐，Module 再接收符合契约的 Tensor。split manifest 决定 loader 使用哪些 records；训练与验证必须使用不同的增强和顺序策略；device、pin memory 和 batch size 共同决定推理和训练的资源预算。后续评估的指标若突然变化，先比较 sample_id、batch shape 和 label 分布。
+
+## 小结
+
+Dataset 定义样本，DataLoader 定义批处理，collate 定义如何把不规则数据变成规则 Tensor。shape、dtype、length、device、shuffle、worker 和内存都是 AI 输入的一部分。先用 num_workers=0 做内容 smoke test，再按测量调吞吐；固定 seed 和样本顺序，记录丢弃与失败，才能让训练结果可复现。

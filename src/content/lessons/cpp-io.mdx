@@ -1,0 +1,148 @@
+---
+id: cpp-io
+slug: files-formatting-and-serialization
+title: "文件、格式化与序列化"
+summary: "处理文件流、文本和二进制边界，理解传感器消息为什么需要稳定格式。"
+track: cpp
+order: 14
+durationMinutes: 16
+concepts: [filesystem, streams, serialization]
+prerequisites: [cpp-ranges]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 文件、格式化与序列化
+
+Node.js 的 `readFile` 和 `JSON.parse` 把文件句柄、编码和错误传播集中在运行时；C++ 的流对象会把这些边界摆到代码中。机器人日志可能比内存大很多，文件还要跨版本、跨机器和跨语言读取，所以“能写出来”不等于“可回放”。本节以可诊断的 CSV/JSONL 为入口，逐步理解文件生命周期、格式兼容和二进制边界。
+
+### 学习目标
+
+你将学会使用 `ifstream`/`ofstream` 进行逐行读写；区分 EOF、权限、解析和部分写入错误；设计包含版本、时间单位与 frame 的消息格式；说明为什么不能直接把 C++ struct 的内存写成跨机器协议；为传感器日志建立可回放的验证路径。
+
+### 文件流是一个有状态的 RAII 对象
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const text = await fs.promises.readFile(file, "utf8");
+const records = text.trim().split("\n").map(JSON.parse);`}
+  targetLabel="C++"
+  targetLanguage="cpp"
+  target={`std::ifstream input{file};
+if (!input) return FileError{"open", file};
+std::string line;
+while (std::getline(input, line)) consume(decode(line));`}
+/>
+
+`ifstream` 离开作用域会关闭文件，但不会替你确认路径可读。逐行读取限制内存峰值，适合 rosbag 导出的 JSONL 或诊断日志；要区分正常 EOF 和磁盘读取失败，可以在循环结束后检查 `input.eof()`、`input.fail()`。输出文件也应检查 `open` 和最终 `flush`，现场磁盘满时不能假设日志已保存。
+
+```cpp
+#include <fstream>
+#include <iostream>
+#include <string>
+
+int main() {
+  std::ifstream input{"readings.csv"};
+  if (!input) { std::cerr << "open failed\n"; return 1; }
+  std::string line;
+  std::size_t line_number = 0;
+  while (std::getline(input, line)) {
+    ++line_number;
+    std::cout << line_number << ": " << line << '\n';
+  }
+  if (!input.eof() && input.fail()) {
+    std::cerr << "read failed after line " << line_number << '\n';
+    return 2;
+  }
+}
+```
+
+用 `g++ -std=c++20 read.cpp -o read` 编译。文件不存在时验证返回码为 1；正常读到文件末尾时 `eof()` 为真，不应把 EOF 当成异常。这比 JS 中只捕获 `readFile` 的异常多了一层流状态模型。
+
+### 用稳定字段设计消息格式
+
+```cpp
+#include <fstream>
+#include <string>
+
+struct Reading {
+  std::uint64_t sequence{};
+  double range_m{};
+};
+
+bool write_reading(std::ofstream& output, const Reading& reading) {
+  output << reading.sequence << ',' << reading.range_m << '\n';
+  return static_cast<bool>(output);
+}
+```
+
+真实项目还要 include `<cstdint>`，并定义分隔符转义、浮点精度、版本号和时间单位。直接 `reinterpret_cast` 一个结构体写二进制会把 padding、字节序和编译器布局带进协议；跨机器传输应使用明确的序列化库或逐字段编码。日志格式要保留原始时间戳和 frame 名，后续 TF2 回放才能定位空间错误。
+
+### 解析字段要有边界
+
+```cpp
+#include <charconv>
+#include <string_view>
+
+bool parse_range(std::string_view text, double& out) {
+  const auto* first = text.data();
+  const auto* last = first + text.size();
+  const auto result = std::from_chars(first, last, out);
+  return result.ec == std::errc{} && result.ptr == last && out >= 0.0;
+}
+```
+
+示例要求整段文本都被消费，`"1.2m"` 不会悄悄当成 `1.2`。生产解析器还要处理 NaN、单位和最大物理范围。验证时准备 `"0.42"`、空串、`"1.2m"`、负数和过大的距离，记录每个输入为何接受或拒绝。错误边界清楚，后面的消息队列才不会收到半解析对象。
+
+### 文本与二进制的取舍
+
+```cpp
+#include <cstdint>
+#include <fstream>
+
+void write_fixed(std::ofstream& out, std::uint64_t stamp_ns, float range_m) {
+  out.write(reinterpret_cast<const char*>(&stamp_ns), sizeof stamp_ns);
+  out.write(reinterpret_cast<const char*>(&range_m), sizeof range_m);
+}
+```
+
+这段代码只适合同一编译器、同一字节序和明确布局的临时实验，不适合设备间接口。跨平台二进制应写入协议规定的字节序和字段宽度，并带 magic、version、payload length 与 checksum。文本格式更容易用 Python 回放和人工检查，二进制更节省带宽；选择必须结合传感器频率、磁盘、CPU 和排错成本。
+
+### 读取失败不是只有异常
+
+路径不存在、权限不足和编码不符合预期，通常在打开或解析边界处理。坏行要记录行号、原文摘要和解析原因，但不要把整行无限写入日志。部分写入时保留临时文件，完成并关闭成功后再原子重命名，避免下次启动读到半个校准文件。若文件被另一个进程同时写，定义锁、追加和快照策略，不能靠 sleep 猜测写入完成。
+
+### RAII、所有权与并发写入
+
+`ofstream` 是拥有文件句柄的对象，离开作用域会释放资源；它不保证业务层已经写完一条完整记录。多个线程共享同一个流需要 mutex，而且锁住磁盘 I/O 会拖慢实时线程。更稳妥的方式是采集线程把结构化事件交给日志线程，日志线程独占文件；退出时先停止生产者，再关闭队列，最后 flush 并关闭文件。
+
+### 编译、链接、运行时排错
+
+`no member named eof` 一类错误先查 include 和类型；模板化流操作的错误要看第一个类型不匹配的位置。链接时缺少序列化库会出现 `undefined reference`，检查 target 的 link 关系。运行时统计为零时，区分文件为空、第一行解析失败和循环从未进入；路径在 launch 环境中可能不是当前目录，使用绝对路径或参数并打印最终解析路径。
+
+### 面向回放的验证闭环
+
+先用三行固定 CSV 做单元测试，再用真实传感器导出文件做集成测试。测试应比较解析成功数、坏行号、时间戳单调性、frame 一致性和距离范围；回放输出要和原始序号对齐。对写入过程，故意在第二行后返回错误，确认正式文件仍是旧版本、临时文件可以清理。可观测指标包括 bytes_written、parse_errors、last_sequence 和 flush_latency。
+
+<KeyIdea title="格式是长期接口，不是临时字符串">
+  <p>文件流负责资源和状态，序列化负责版本、单位、字节序和错误诊断。先定义可回放的格式，再决定文本可读性和二进制性能的取舍。</p>
+</KeyIdea>
+
+## 迁移练习
+
+实现 JSONL/CSV 读取器：每行包含序号、时间戳和距离，统计成功记录、坏行号和最终 EOF 状态。再写一个带版本字段的文本导出器，模拟写入中途失败并验证临时文件不会被当作完整校准文件使用。
+
+<Exercise
+  title="做一份可回放的测距日志"
+  prompt="选择 CSV 或 JSONL，定义序号、stamp_ns、range_m 三个字段和版本规则；实现逐行读取与错误统计，并说明如何处理部分写入。"
+  hint="输入流用 getline，解析前递增 line_number；输出先写 .tmp，成功关闭后再替换正式文件。"
+  solution={`读取函数应在每次 getline 后记录行号，解析成功增加 accepted，失败保存行号与原因，循环结束再检查 fail/eof。导出写入带版本的临时文件并确认 flush/close 成功后重命名；协议字段要明确纳秒和米，避免回放时误读单位。`}
+/>
+
+<SolutionReveal>
+  <p>IO 的工程难点在失败和兼容，而不在记住 `ifstream` 的名字。把格式、版本和时间单位固定下来，下一节的 CMake target 才能把解析器和节点清晰分开。</p>
+</SolutionReveal>

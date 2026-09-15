@@ -1,0 +1,209 @@
+---
+id: python-numpy-linear
+slug: numpy-broadcasting-and-linear-algebra
+title: "NumPy 广播与线性代数"
+summary: "掌握 shape、axis、broadcasting 和矩阵操作，避免逐元素循环拖慢数据处理。"
+track: python
+order: 19
+durationMinutes: 18
+concepts: [numpy, broadcasting, linear algebra]
+prerequisites: [python-numpy]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+学完本节，你能够把一次矩阵运算解释成可检查的输入输出契约，而不是凭试错修改转置。你将会：
+
+- 从最后一个轴推导广播结果，并说明 bias 为什么可以加到每一行。
+- 区分逐元素乘法 *、矩阵乘法 @ 和批量矩阵乘法。
+- 用非方阵和断言捕获权重转置错误，了解 axis 与 keepdims。
+- 编写数值稳定的 sigmoid、softmax 或 log-sum-exp，处理溢出、除零和非有限值。
+
+## 从 JS/TS 迁移的心智模型
+
+JS/TS 的嵌套数组不会强制矩阵维度，rows.map 的内层循环通常由开发者自己维护列索引。NumPy 广播则按最后一个轴向右对齐：相等或为 1 才能合并。这让 features - mean 很简洁，也让一个错误的 batch 向量在广播成功时悄悄产生错误语义。AI 中一层线性变换通常是 x @ weight + bias，每个 shape 都应该能够读成一句话。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const scores = rows.map(row =>
+  weights.map((column, j) =>
+    column.reduce((sum, weight, i) => sum + row[i] * weight, 0) + bias[j],
+  ),
+);`}
+  targetLabel="Python / NumPy"
+  targetLanguage="python"
+  target={`logits = features @ weight + bias
+assert logits.shape == (features.shape[0], weight.shape[1])`}
+/>
+
+<KeyIdea title="广播成功不等于业务正确">
+  <p>先给每个轴命名，再让 NumPy 执行计算。形状断言和一组手算值是线性代数代码的最小测试。</p>
+</KeyIdea>
+
+## 广播规则与 axis 推导
+
+若 x.shape 是 batch、features，mean.shape 是 features，最后一轴对齐，均值会复制到每一行；若想按每条样本减去一个标量向量，必须明确是 batch、1 还是 batch。keepdims=True 可以保留被聚合的轴，使结果继续广播，例如 x.mean(axis=1, keepdims=True) 的 shape 是 batch、1。
+
+对三维张量 batch、time、features，x.mean(axis=1) 得到 batch、features，表示时间池化；x.mean(axis=2) 得到 batch、time，表示每个时间点的特征均值。两者都能运行，但模型含义完全不同。
+
+### 示例一：非方阵线性层
+
+```python
+import numpy as np
+
+x = np.array([[1.0, 2.0, 3.0], [0.5, 1.0, 2.0]], dtype=np.float32)  # (2, 3)
+weight = np.array(
+    [[0.2, -0.1], [0.4, 0.3], [-0.5, 0.6]],
+    dtype=np.float32,
+)  # (3, 2)
+bias = np.array([0.1, -0.2], dtype=np.float32)  # (2,)
+
+logits = x @ weight + bias
+print(logits.shape)
+assert logits.shape == (2, 2)
+```
+
+输出是 (2, 2)。x 的最后一维 3 必须等于 weight 的第一维 3，输出 units 是 2；使用非方阵是故意的，因为把 weight.T 误写进去会立即暴露，而方阵转置错误可能仍然得到一个“看起来合理”的结果。
+
+## 矩阵乘法、转置与内存
+
+* 是逐元素运算，要求广播兼容；@ 和 np.matmul 表示矩阵乘法；np.linalg.solve(A, b) 通常比先算 inv(A) @ b 更稳定、更省资源。高维 matmul 会把最后两个轴当矩阵，其余轴作为 batch 维，使用前先写出每一轴的含义。
+
+转置通常改变 stride，不一定复制数据。把非连续数组交给某些外部库时，可能触发隐式拷贝；对性能敏感的路径记录输入 dtype、连续性和矩阵大小，不要把所有东西盲目转为 float64。特征列顺序也属于矩阵契约，权重文件和数据版本必须一起管理。
+
+### 示例二：按 shape 检查线性层
+
+```python
+def linear(x, weight, bias):
+    x = np.asarray(x, dtype=np.float32)
+    weight = np.asarray(weight, dtype=np.float32)
+    bias = np.asarray(bias, dtype=np.float32)
+
+    if x.ndim != 2:
+        raise ValueError(f"x must be (batch, features), got {x.shape}")
+    if weight.ndim != 2 or x.shape[1] != weight.shape[0]:
+        raise ValueError(f"x {x.shape} cannot multiply weight {weight.shape}")
+    if bias.shape != (weight.shape[1],):
+        raise ValueError(f"bias must be ({weight.shape[1]},), got {bias.shape}")
+    if not np.isfinite(x).all():
+        raise ValueError("x contains non-finite values")
+    return x @ weight + bias
+```
+
+函数的验证不是只测一个二维方阵。至少测试 (1, 3) 与 (3, 2)、空 batch 的策略、错误的 (2,) bias、错误转置和极端数值。若空 batch 允许通过，结果应明确为 (0, units)，并且不能调用依赖 min 的后续统计。
+
+## 数值稳定性：先处理尺度再做激活
+
+直接写 1 / (1 + np.exp(-logits)) 在 logits 很小或很大时可能产生 overflow warning。对 softmax，先减去每行最大值；对 log-sum-exp，使用稳定公式。警告不能用 warnings.filterwarnings 静默掉，因为 Inf/NaN 会让模型评估和线上输出失真。输入也要在矩阵运算前检查有限性和量纲。
+
+### 示例三：稳定 sigmoid 与 softmax
+
+```python
+def stable_sigmoid(z):
+    z = np.asarray(z, dtype=np.float32)
+    result = np.empty_like(z)
+    positive = z >= 0
+    result[positive] = 1.0 / (1.0 + np.exp(-z[positive]))
+    exp_z = np.exp(z[~positive])
+    result[~positive] = exp_z / (1.0 + exp_z)
+    return result
+
+def stable_softmax(logits, axis=-1):
+    logits = np.asarray(logits, dtype=np.float32)
+    if not np.isfinite(logits).all():
+        raise ValueError("logits contain NaN or Inf")
+    shifted = logits - np.max(logits, axis=axis, keepdims=True)
+    exp_values = np.exp(shifted)
+    return exp_values / np.sum(exp_values, axis=axis, keepdims=True)
+
+print(stable_sigmoid(np.array([-1000, 0, 1000])).tolist())
+```
+
+输出应接近 [0.0, 0.5, 1.0]，而不是 NaN。softmax 的验证包括每行和接近 1、输出范围在 [0, 1]，以及极端输入不会出现非有限值。若模型需要 log-probability，应进一步使用 log_softmax 思路，避免先算接近零的概率再取对数。
+
+## 运行、输出与验证
+
+把 shape 断言放在每层边界，并保存一组手算 fixture。一个最小验证脚本可以输出：
+
+```python
+scores = linear(x, weight, bias)
+prob = stable_softmax(scores, axis=1)
+print({
+    "x": x.shape,
+    "weight": weight.shape,
+    "scores": scores.shape,
+    "prob_row_sums": prob.sum(axis=1).round(6).tolist(),
+    "finite": bool(np.isfinite(prob).all()),
+})
+assert np.allclose(prob.sum(axis=1), 1.0)
+```
+
+若结果 shape 对了但数值不对，先用两行输入手工算第一项乘加，检查列顺序和 weight 是否转置；若只有大值失败，再检查 exp、标准化和 dtype。性能问题则测量矩阵大小、耗时、峰值内存和 BLAS 线程设置，不能用单个小样本的 wall time 推断生产性能。
+
+## 常见错误、排错与调试
+
+- 用 * 代替 @：结果可能仍能广播但不代表线性层，打印运算前后 shape 并用非方阵 fixture。
+- 把 batch 当 batch、1：使用 reshape(-1, 1) 明示语义，并在测试中检查输出轴。
+- 过度使用 transpose：每次转置都写出原 shape 和目标 shape，避免为了消错把列含义打乱。
+- 全是 NaN 或 Inf：检查输入、除零、标准差、指数范围以及第一次出现非有限值的中间数组。
+- 结果慢或内存高：检查临时数组、dtype、连续内存和矩阵尺寸；profile 后再考虑原地运算或分块。
+- 训练/验证结果异常接近：回到特征构造和广播代码检查是否把未来统计量泄漏到了训练。
+
+## 练习与任务
+
+实现一个 NumPy 线性分类头：linear(x, weight, bias) 返回 logits，predict_proba(logits) 返回稳定 softmax。输入是 batch、features，权重是 features、classes，要求支持单批、多类别和空 batch 策略；错误 shape 和非有限值必须给出可读异常。
+
+<Exercise
+  title="广播与数值稳定性练习"
+  prompt="实现线性层和稳定 softmax，并用非方阵、极端 logits、错误 bias、NaN 输入做验证；在结果中报告 shape、dtype、每行概率和。"
+  hint="检查 weight.shape[0] 与 x.shape[1]；softmax 减去 axis=-1 的最大值并使用 keepdims=True。"
+  solution={`def predict_proba(logits):
+    logits = np.asarray(logits, dtype=np.float32)
+    shifted = logits - logits.max(axis=-1, keepdims=True)
+    values = np.exp(shifted)
+    return values / values.sum(axis=-1, keepdims=True)
+
+logits = linear(x, weight, bias)
+probabilities = predict_proba(logits)
+assert probabilities.shape == (x.shape[0], weight.shape[1])`}
+/>
+
+### 完整答案
+
+```python
+def predict_proba(logits):
+    logits = np.asarray(logits, dtype=np.float32)
+    if logits.ndim != 2 or logits.shape[1] == 0:
+        raise ValueError(f"logits must be (batch, classes), got {logits.shape}")
+    if not np.isfinite(logits).all():
+        raise ValueError("logits contain NaN or Inf")
+    shifted = logits - np.max(logits, axis=1, keepdims=True)
+    exp_values = np.exp(shifted)
+    probabilities = exp_values / np.sum(exp_values, axis=1, keepdims=True)
+    return probabilities.astype(np.float32, copy=False)
+
+logits = linear(x, weight, bias)
+probabilities = predict_proba(logits)
+assert probabilities.shape == (x.shape[0], weight.shape[1])
+assert np.allclose(probabilities.sum(axis=1), 1.0)
+```
+
+用一个 features、3 与 weight、3、4 的 fixture；再故意传入 3、2 的 weight，确认异常在边界处出现。这样你能区分“数学实现错”与“调用者传错 shape”，后续 Tensor 和模型课程会直接复用这个思路。
+
+<SolutionReveal>
+  <p>矩阵代码的验证证据至少包括 shape、有限性和可手算数值。稳定性不是锦上添花：线上一个 Inf 就可能让整个 batch 的服务响应变成 500。</p>
+</SolutionReveal>
+
+## 与同一 AI 项目主线的连接
+
+pandas/NumPy 负责把清洗后的事件变成 batch、features，线性代数负责把这个契约交给 baseline 或神经网络。训练与推理必须共享特征顺序、标准化参数和 dtype；当 scikit-learn Pipeline 或 PyTorch Module 替换线性头时，shape 断言仍然有效。把非有限值、极端范围和矩阵尺寸写进数据质量报告，后面的评估指标和服务超时才不会被低级数值错误污染。
+
+## 小结
+
+广播是有规则的轴对齐，矩阵乘法是有输入输出形状的协议，数值稳定性是线上可靠性的组成部分。先命名轴，后写 @；先断言维度，后优化内存；先处理极端值，后计算概率。shape、dtype、有限性和一组可复现 fixture，构成了 AI 数值代码最小但有力的调试框架。

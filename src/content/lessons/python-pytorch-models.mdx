@@ -1,0 +1,268 @@
+---
+id: python-pytorch-models
+slug: pytorch-models-and-training-loops
+title: "PyTorch 模型与训练循环"
+summary: "拆解 Module、loss、optimizer 和 epoch，建立能调试的最小训练循环。"
+track: python
+order: 24
+durationMinutes: 20
+concepts: [nn.Module, loss, optimizer]
+prerequisites: [python-pytorch-tensors]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+本节要把一个可调用的 Tensor 函数变成能训练、能评估、能解释的模型。学完后你能够：
+
+- 用 nn.Module 表达层、参数和 forward，并检查输入输出 shape。
+- 选择与 logits 和标签编码匹配的 loss，理解 optimizer 如何更新参数。
+- 写出包含 train、eval、zero_grad、backward 和 step 的训练循环。
+- 用小批次过拟合诊断数据或代码问题，并识别真正的泛化过拟合。
+
+## 从 JS/TS 迁移的心智模型
+
+在 JavaScript/TypeScript 里，model.predict(batch) 常常隐藏状态；训练可能只是调用一个 SDK 的 train 方法。PyTorch 把状态拆开：Module 持有参数和 forward 逻辑，loss 把预测与标签变成标量，backward 计算梯度，optimizer.step 改参数。这个拆分让每一步都可观察，也要求你主动管理模式、设备、梯度和 checkpoint。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`for (const batch of batches) {
+  const logits = model.forward(batch.features);
+  const loss = criterion(logits, batch.labels);
+  optimizer.step();
+}`}
+  targetLabel="Python / PyTorch"
+  targetLanguage="python"
+  target={`for features, labels in loader:
+    optimizer.zero_grad(set_to_none=True)
+    logits = model(features)
+    loss = criterion(logits, labels)
+    loss.backward()
+    optimizer.step()`}
+/>
+
+<KeyIdea title="训练循环是可观测的状态机">
+  <p>每个 step 都有输入、前向输出、loss、梯度和参数更新。把这些边界打印或记录出来，模型不再是只能祈祷的黑盒。</p>
+</KeyIdea>
+
+## Module 与 forward 的契约
+
+nn.Module 的 __init__ 声明子层，forward 声明数据流；调用 model(x) 会触发 forward 并维护 hooks、autograd 和模式状态。分类器通常接收 batch、features，输出 batch、classes 的 logits。CrossEntropyLoss 期望未归一化 logits 和 batch 形状的 long 类别标签，不要先在模型中做 softmax 再重复交给它。
+
+层的最后一维必须匹配 Linear 的输入维度。若输入来自图像或序列，先明确 flatten、pooling 或卷积输出的 shape，再连接全连接层。模型内部的 shape 检查应给出实际值，但不应在生产路径每个样本都打印完整 Tensor。
+
+### 示例一：定义一个可检查的分类 Module
+
+```python
+import torch
+from torch import nn
+
+class EventClassifier(nn.Module):
+    def __init__(self, feature_count=3, class_count=2):
+        super().__init__()
+        self.feature_count = feature_count
+        self.net = nn.Sequential(
+            nn.Linear(feature_count, 16),
+            nn.ReLU(),
+            nn.Linear(16, class_count),
+        )
+
+    def forward(self, features):
+        if features.ndim != 2 or features.shape[1] != self.feature_count:
+            raise ValueError(
+                f"expected (batch, {self.feature_count}), got {tuple(features.shape)}"
+            )
+        return self.net(features)
+
+model = EventClassifier()
+x = torch.randn(8, 3, dtype=torch.float32)
+logits = model(x)
+print(tuple(logits.shape), logits.dtype)
+```
+
+运行输出应是 (8, 2) 和 torch.float32。8 是 batch，3 是输入特征，2 是类别数。若类别数由配置决定，不要把 2 写死在评估代码；保存 feature_count、class_count 和特征名称，之后加载 checkpoint 才能重建同一契约。
+
+## loss、optimizer 与参数更新
+
+loss 的 reduction 默认把 batch 的误差聚合为一个标量，才能进行 backward。二分类可以用两类 logits 配 CrossEntropyLoss 和 long 标签，也可以用单个 logit 配 BCEWithLogitsLoss 和 float 标签，二者不要混用。类别不平衡时可传 class weights，但权重来源应记录，否则 loss 的变化无法与 F1 或 recall 对齐。
+
+optimizer 读取 parameter.grad 并按学习率、动量或自适应规则更新参数。zero_grad(set_to_none=True) 避免旧梯度累积；梯度裁剪可以控制爆炸，但不能修复错误的 loss 或数据尺度。学习率、batch size、dtype 和梯度范数应进入实验记录。
+
+### 示例二：一次完整的参数更新
+
+```python
+torch.manual_seed(7)
+model = EventClassifier()
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+criterion = nn.CrossEntropyLoss()
+
+x = torch.tensor([[0.2, 10.0, 0.4], [0.9, 30.0, 1.2]], dtype=torch.float32)
+y = torch.tensor([0, 1], dtype=torch.long)
+
+before = model.net[0].weight.detach().clone()
+optimizer.zero_grad(set_to_none=True)
+logits = model(x)
+loss = criterion(logits, y)
+loss.backward()
+grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+optimizer.step()
+
+print(float(loss.detach()), float(grad_norm), bool(torch.equal(before, model.net[0].weight)))
+```
+
+最后一个值应为 False，说明参数确实更新；loss 一次升降都不能证明训练有效。若 grad_norm 是 0，检查 labels、输入、requires_grad 和是否错误地 detach；若非常大，打印输入范围、loss 类型和学习率。clip_grad_norm_ 是稳定性护栏，不应被当作隐藏错误的补丁。
+
+## train、eval 与 epoch
+
+model.train() 会让 Dropout 随机丢弃、BatchNorm 更新运行统计；model.eval() 则使用推理行为。eval 不会自动关闭梯度，验证时要配合 torch.inference_mode 或 no_grad。一个 epoch 是完整遍历训练数据，验证应在 epoch 结束后使用独立数据，不要用训练 loss 代替泛化指标。
+
+训练循环要先移动 batch 到 model 所在 device，保持 features 和 labels 的 shape、dtype 一致。每个 epoch 记录平均 loss、学习率、训练样本数、验证 loss 和任务指标。平均 loss 要按样本数加权，不能简单平均不同 batch size 的 batch mean。
+
+### 示例三：最小可调试训练循环
+
+```python
+def run_epoch(model, loader, criterion, optimizer=None, device="cpu"):
+    training = optimizer is not None
+    model.train(training)
+    total_loss = 0.0
+    total_rows = 0
+    correct = 0
+
+    context = torch.enable_grad() if training else torch.inference_mode()
+    with context:
+        for features, labels in loader:
+            features = features.to(device, dtype=torch.float32)
+            labels = labels.to(device, dtype=torch.long)
+            if features.ndim != 2 or labels.ndim != 1:
+                raise ValueError("invalid batch shape")
+            if training:
+                optimizer.zero_grad(set_to_none=True)
+            logits = model(features)
+            loss = criterion(logits, labels)
+            if training:
+                loss.backward()
+                optimizer.step()
+            rows = labels.shape[0]
+            total_loss += float(loss.detach()) * rows
+            total_rows += rows
+            correct += int((logits.argmax(dim=1) == labels).sum())
+    if total_rows == 0:
+        raise ValueError("empty loader")
+    return {"loss": total_loss / total_rows, "accuracy": correct / total_rows}
+```
+
+这个函数输出 loss 和 accuracy，但真实唤醒任务还应计算 precision、recall、F1，并按设备或用户分组。训练 accuracy 上升而 validation recall 下降是过拟合或切分问题的信号，不应只继续训练更多 epoch。空 loader 要显式报错，否则除零会在日志末端才出现。
+
+## 过拟合诊断和容量选择
+
+先让一个很小、固定的 batch 过拟合到接近零 loss，是检查 labels、forward、loss、optimizer 和学习率是否接通的快速方法。它不是泛化目标：如果小 batch 学不会，先排查代码；如果小 batch 学会而 validation 不升，检查数据切分、重复、正则化和分布差异。
+
+过拟合可以通过减少层宽、增加 weight decay、dropout、早停、数据增强和更公平的 split 缓解。不要用 test loss 选择 epoch；用 validation 指标保存最佳 checkpoint，test 只在协议冻结后运行。对类别不平衡，比较 F1、recall 和混淆矩阵，而不是只看 loss。
+
+## 运行、输出与验证
+
+一次训练至少应输出 epoch、train_loss、valid_loss、valid_f1、学习率、梯度范数和耗时，并验证模型输出：
+
+```python
+stats = run_epoch(model, train_loader, criterion, optimizer, device)
+valid_stats = run_epoch(model, valid_loader, criterion, None, device)
+
+print({"train": stats, "valid": valid_stats})
+assert all(torch.isfinite(parameter).all() for parameter in model.parameters())
+assert valid_stats["loss"] >= 0
+```
+
+若 loss 变成 NaN，保存发生问题的 batch 的 shape、dtype、范围和原始 ID，二分定位到具体变换；若 epoch 耗时突然增长，检查 DataLoader、device 拷贝和 GPU 显存，而不是只改网络。固定 torch.manual_seed、数据排序和 split manifest，才能比较两次训练结果。
+
+## 常见错误、排错与调试
+
+- 忘记 model.train 或 model.eval：Dropout/BatchNorm 行为错误，验证波动大；在 epoch 边界打印 model.training。
+- 忘记 zero_grad：梯度跨 batch 累积，等效学习率改变；记录梯度范数并做两步最小复现。
+- CrossEntropyLoss 标签错误：检查 logits 是 batch、classes，labels 是 batch 的 long 类别索引，且范围在 0 到 classes-1。
+- loss 不下降：先过拟合小 batch，再检查输入标准化、标签映射、学习率和 optimizer 是否持有 model.parameters。
+- 训练很快但验证很差：检查 data leakage、重复 group、训练和验证分布，以及是否在 test 上反复调参。
+- 显存或耗时超预算：记录 batch size、参数量、激活规模、device 和峰值显存；必要时使用梯度累积或降低 batch。
+- 结果不可复现：固定 seed、worker 配置、版本和确定性选项，明确允许的浮点误差。
+
+## 练习与任务
+
+用一个二分类传感器数据集写 train_one_epoch 和 evaluate：模型使用 Module，loss 使用 CrossEntropyLoss，optimizer 使用 AdamW；先做 16 条样本的小批次过拟合诊断，再用独立 validation 观察 loss、precision、recall、F1。记录最优 validation F1 对应的 epoch，不要使用 test 选择模型。
+
+<Exercise
+  title="PyTorch 训练循环练习"
+  prompt="实现 EventClassifier、run_epoch 和 overfit_probe；输出 train/valid 的 loss 与 F1，检查 logits shape、labels dtype、model.train/eval 状态，并在 validation 指标变好时保存 state_dict。"
+  hint="训练分支使用 zero_grad、backward、step；评估分支使用 inference_mode；先用固定小 batch 验证 loss 能下降。"
+  solution={`model.train()
+optimizer.zero_grad(set_to_none=True)
+logits = model(features)
+loss = criterion(logits, labels.long())
+loss.backward()
+optimizer.step()
+return float(loss.detach())`}
+/>
+
+### 完整答案
+
+```python
+def train_one_epoch(model, loader, criterion, optimizer, device):
+    model.train()
+    total_loss = 0.0
+    total = 0
+    for features, labels in loader:
+        features = features.to(device, dtype=torch.float32)
+        labels = labels.to(device, dtype=torch.long)
+        if features.ndim != 2 or labels.ndim != 1:
+            raise ValueError("expected features (batch, features) and labels (batch)")
+        optimizer.zero_grad(set_to_none=True)
+        logits = model(features)
+        if logits.shape[0] != labels.shape[0]:
+            raise ValueError("logit and label batch sizes differ")
+        loss = criterion(logits, labels)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+        optimizer.step()
+        rows = labels.shape[0]
+        total_loss += float(loss.detach()) * rows
+        total += rows
+    if total == 0:
+        raise ValueError("empty training loader")
+    return total_loss / total
+
+def evaluate(model, loader, criterion, device):
+    model.eval()
+    predictions, targets = [], []
+    total_loss = 0.0
+    total = 0
+    with torch.inference_mode():
+        for features, labels in loader:
+            features = features.to(device, dtype=torch.float32)
+            labels = labels.to(device, dtype=torch.long)
+            logits = model(features)
+            loss = criterion(logits, labels)
+            total_loss += float(loss) * labels.shape[0]
+            total += labels.shape[0]
+            predictions.extend(logits.argmax(dim=1).cpu().tolist())
+            targets.extend(labels.cpu().tolist())
+    if total == 0:
+        raise ValueError("empty validation loader")
+    return {"loss": total_loss / total, "predictions": predictions, "targets": targets}
+```
+
+再用 sklearn.metrics 计算 precision、recall、F1，并把 model.state_dict、optimizer.state_dict、epoch、config、data_version 一起保存。验证两次加载 checkpoint 的结果一致；只有这样，训练循环的“能跑”才升级为可审核的模型实验。
+
+<SolutionReveal>
+  <p>训练循环的每一行都有状态含义：train/eval 决定模块行为，loss 决定梯度，optimizer 决定更新，validation 决定选择。把状态和指标同时记录，过拟合与代码错误才不会混成一个数字。</p>
+</SolutionReveal>
+
+## 与同一 AI 项目主线的连接
+
+Tensor 课程提供 device、dtype 和 shape 护栏，本节把它们放进 Module 和 optimizer；DataLoader 课程会负责稳定地产生 batch，evaluation 课程会把 logits 转成更完整的指标与 checkpoint。训练配置、split manifest、特征顺序和随机 seed 必须贯穿全链路。模型越复杂，越需要用小批次过拟合、独立验证和资源预算证明它值得进入推理服务。
+
+## 小结
+
+Module 定义计算，loss 定义错误，autograd 提供梯度，optimizer 修改参数，train/eval 定义运行模式。一个可靠循环要检查 batch shape、标签 dtype、梯度清零、非有限值、验证指标和耗时；过拟合小 batch 是诊断工具，不是最终成绩。先让边界可观察，再谈网络深度和调参。
