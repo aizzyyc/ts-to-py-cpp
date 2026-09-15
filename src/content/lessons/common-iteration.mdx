@@ -1,0 +1,84 @@
+---
+id: common-iteration
+slug: iteration-laziness-and-streams
+title: "迭代、惰性与数据流"
+summary: "比较数组链、生成器、迭代器和流式处理，学会按数据规模选择实现。"
+track: common
+order: 10
+durationMinutes: 14
+concepts: [iteration, lazy evaluation, streams]
+prerequisites: [common-mutability]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 迭代、惰性与数据流
+
+JS/TS 的 `map`/`filter` 会快速生成中间数组；Python 生成器可以延迟产生数据；C++ 迭代器和 ranges 让算法组合更接近数据流。选择时要看内存、消费速度和错误的传播方式。处理十条配置记录时，数组链的可读性通常比节省一次分配重要；处理一百万条日志、图片索引或传感器帧时，惰性管线可以把峰值内存从“所有中间结果”降到“当前窗口”。
+
+惰性也改变了执行时机：创建生成器并不等于读取文件，真正迭代时才会发生 IO 和异常。JS 的异步迭代器、Python 的 `yield`、C++ 的 input range 都要求消费者明确何时结束。AI 数据清洗要考虑批大小和背压，机器人流要考虑丢帧策略，不能只看一段链式表达式是否漂亮。
+
+### 数组链在大数据上可能不是最好的模型
+
+下面这段代码只保留同一个意图，重点观察输入边界、数据流和失败语义，而不是逐字符翻译。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const scores = events
+  .filter(event => event.valid)
+  .map(event => score(event));`}
+  targetLabel="Python / C++"
+  targetLanguage="text"
+  target={`# Python
+scores = (score(event) for event in events if event.valid)
+
+// C++
+auto scores = events | std::views::filter(valid)
+                         | std::views::transform(score);`}
+/>
+
+### 何时物化，何时惰性
+
+惰性管线适合一次消费、顺序读取和可控的生产速度；需要多次遍历、排序、随机访问或跨线程传递时，物化容器更直接。不要把“零中间数组”当成绝对目标：排序本来就需要看到完整输入，调试也可能需要保存样本。先用输入规模和消费者速度估算，再用内存/吞吐测量验证。
+
+```python
+def valid_scores(lines):
+    for line in lines:
+        event = parse(line)
+        if event.valid:
+            yield score(event)
+
+for value in valid_scores(open("events.jsonl", encoding="utf-8")):
+    write_feature(value)
+```
+
+### 错误、终点与背压
+
+生成器中的解析错误会在消费点抛出，调用方要决定跳过一行、记录错误还是停止整批。异步流还要定义关闭动作，C++ range 需要确保迭代器不引用已销毁的容器。若生产者快于消费者，应设置有界队列或批处理窗口；否则惰性语法仍可能让未消费的数据在上游缓存中无限积累。
+
+### 常见错误与排错思路
+
+最容易踩的是重复遍历一次性迭代器，第二次得到空结果；另一个是把生成器传给需要长度或索引的函数。排错时先打印“创建”和“首次消费”的位置，检查是否提前打开/关闭文件，再用小输入逐项比对 eager 与 lazy 版本。若内存仍持续增长，观察队列长度和缓存，而不是只盯着生成器代码。
+
+<KeyIdea title="数组链在大数据上可能不是最好的模型">
+  <p>惰性不是性能魔法，它只是把计算和内存分配的时机交给数据流设计；终点、背压和错误处理必须同样明确。</p>
+</KeyIdea>
+
+## 迁移练习
+
+请完成：把处理一百万条事件的数组链改造成不会一次性保存全部中间结果的管线，并指定解析失败时跳过还是终止、消费者变慢时如何限制缓存。
+
+<Exercise
+  title="迭代、惰性与数据流练习"
+  prompt="把处理一百万条事件的数组链改造成不会一次性保存全部中间结果的管线。"
+  hint="Python 使用 yield 或生成器表达式；C++ 先考虑输入范围和输出容器，并为流设置有界缓冲。"
+  solution={`Python 用 yield 逐条解析并在消费点写出；C++ 用 ranges view 过滤和转换，最终消费到文件或有界队列。解析错误记录行号后跳过，队列达到上限时阻塞生产者或按业务规则丢弃旧帧。`}
+/>
+
+<SolutionReveal>
+  <p>惰性不是性能魔法，它只是把计算和内存分配的时机交给数据流设计。完成后，请用一个小输入比较两种实现的结果、峰值内存和错误行为。</p>
+</SolutionReveal>

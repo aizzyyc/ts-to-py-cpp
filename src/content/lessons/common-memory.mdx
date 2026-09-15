@@ -1,0 +1,84 @@
+---
+id: common-memory
+slug: stack-heap-and-lifetimes
+title: "栈、堆与对象生命周期"
+summary: "用内存布局解释闭包、引用、堆对象和显式生命周期在三种语言里的差异。"
+track: common
+order: 18
+durationMinutes: 16
+concepts: [stack, heap, lifetime]
+prerequisites: [common-synchronization]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 栈、堆与对象生命周期
+
+JS 和 Python 通过垃圾回收管理大部分对象，但引用和闭包仍可能让大对象存活更久。C++ 进一步要求你理解作用域、栈对象、堆对象和智能指针的所有权。迁移到 AI 或机器人程序时，图像、点云和张量的内存量很大，生命周期不清会表现为内存峰值、延迟抖动、悬空引用或 double free。先画出对象从创建到最后一次使用的时间线，再决定复制、借用还是共享所有权。
+
+“在堆上”不等于“安全”：垃圾回收只保证仍可达对象不会被回收，不能阻止闭包持有过大的 buffer；`shared_ptr` 只保证引用计数，不会自动解决循环引用或数据竞争。真正重要的是谁拥有存储、回调何时执行、异步任务取消后谁负责释放。
+
+### 生命周期决定了引用是否安全
+
+下面这段代码只保留同一个意图，重点观察输入边界、数据流和失败语义，而不是逐字符翻译。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`function makeReader(buffer: Uint8Array) {
+  return () => buffer.byteLength;
+}
+const read = makeReader(data);`}
+  targetLabel="Python / C++"
+  targetLanguage="text"
+  target={`# Python
+def make_reader(buffer):
+    return lambda: len(buffer)
+
+// C++
+auto make_reader(std::shared_ptr<Buffer> buffer) {
+  return [buffer = std::move(buffer)] { return buffer->size(); };
+}`}
+/>
+
+### 作用域、闭包和借用
+
+闭包捕获会延长或改变数据的生命周期。JS/TS 中回调捕获 `Uint8Array`，Python lambda 捕获列表，都会让对象在回调仍存活时继续占用内存；C++ 若按引用捕获局部变量，回调晚执行就会悬空，按值捕获又可能复制大缓冲区。可以只捕获必要的标量，或明确捕获 `shared_ptr`/移动所有权，但要评估引用计数和复制成本。
+
+```cpp
+auto make_reader(std::shared_ptr<const Buffer> buffer) {
+  return [buffer = std::move(buffer)]() -> std::size_t {
+    return buffer->size();
+  };
+}
+```
+
+### 栈、堆和资源释放
+
+小的临时值适合栈对象，离开作用域自动销毁；大块或跨异步边界的数据需要稳定存储，并用 RAII、上下文管理器或 finally 释放文件、锁和设备句柄。Python 的引用计数实现细节不能替代显式关闭文件/网络连接，JS 的 GC 也不能及时释放原生 GPU 资源。对 C++，优先 `vector`、`unique_ptr` 和拥有明确析构的类型，少用裸 `new/delete`。
+
+### 常见错误与排错思路
+
+内存持续增长时，先查缓存、闭包、全局列表和未结束任务是否仍持有引用；C++ 崩溃时用 AddressSanitizer 查越界、use-after-free 和 double free。若异步回调读到旧数据，记录 buffer id、创建/释放时间和任务完成时间。不要一看到内存高就改成 `shared_ptr`：先确认所有权图，循环引用可能把问题变成永久泄漏。
+
+<KeyIdea title="生命周期决定了引用是否安全">
+  <p>AI 和机器人程序常处理大块数据与异步回调，生命周期意识会直接影响稳定性；明确拥有、借用和释放责任比选择某个指针类型更重要。</p>
+</KeyIdea>
+
+## 迁移练习
+
+请完成：检查一个异步回调是否可能持有已失效的对象，并改成安全的所有权表达；同时指出怎样避免因为回调或缓存让大 buffer 一直存活。
+
+<Exercise
+  title="栈、堆与对象生命周期练习"
+  prompt="检查一个异步回调是否可能持有已失效的对象，并改成安全的所有权表达；同时指出怎样避免因为回调或缓存让大 buffer 一直存活。"
+  hint="画出创建对象、注册回调和回调执行的时间线，再决定复制标量、移动 buffer 还是共享所有权。"
+  solution={`若回调可能晚于对象作用域执行，不捕获局部变量引用；只复制必要标量，或捕获明确的 shared ownership 并在完成/取消时释放。限制缓存容量，取消任务并清空回调引用，避免闭包成为大 buffer 的隐藏根。`}
+/>
+
+<SolutionReveal>
+  <p>AI 和机器人程序常处理大块数据与异步回调，生命周期意识会直接影响稳定性。完成后，请用 sanitizer 或内存快照验证“释放后不访问、任务结束后不残留大对象”。</p>
+</SolutionReveal>

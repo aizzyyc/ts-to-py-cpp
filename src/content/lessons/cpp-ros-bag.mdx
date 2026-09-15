@@ -1,0 +1,113 @@
+---
+id: cpp-ros-bag
+slug: ros2-bag-testing-and-replay
+title: "rosbag、回放与离线测试"
+summary: "记录和回放消息，把真实设备问题转成可重复的离线测试输入。"
+track: cpp
+order: 29
+durationMinutes: 20
+concepts: [rosbag, replay, offline testing]
+prerequisites: [cpp-ros-tf2]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## rosbag、回放与离线测试
+
+前端 bug 常保存 JSON fixture 或录屏；机器人则可以用 rosbag 记录 topic、时间和连接上下文，再在没有真实设备的环境中回放。bag 不只是“数据文件”：它保留了消息序列和时间间隔，回放节点的参数、QoS 和 `/clock` 设置决定测试是否重现现场。先把现场问题缩成可保留、可脱敏、可自动比较的输入。
+
+## 学习目标
+
+- 能把 JS/TS 中保存 JSON fixture 的经验迁移到选择 topic、TF、诊断和配置，建立可脱敏、可复现的现场证据。
+- 能理解 bag 时间、消息时间和 wall/steady clock 的区别，并用 `/clock` 正确回放。
+- 能把人工观察转成计数、延迟、年龄和输出误差组成的离线回归验收。
+
+### 把现场问题变成固定输入
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`await recordSession("scan", "imu");
+await replay("session.json", message => pipeline(message));
+expect(metrics.invalid).toBe(3);`}
+  targetLabel="C++ / ROS 2"
+  targetLanguage="cpp"
+  target={`ros2 bag record /scan /imu /tf -o session
+ros2 bag play session --clock
+// test node consumes replayed topics and publishes metrics`}
+/>
+
+记录 `/tf`、参数和相关诊断 topic，否则离线处理可能缺少坐标或无法解释异常。`ros2 bag info` 先确认 topic、消息类型、起止时间和数量；回放时用 `use_sim_time` 的节点订阅 `/clock`，时间驱动的超时才会和现场节奏一致。对高频流可以调整 rate，但要知道它会改变并发和延迟行为。
+
+### 记录和回放的最小流程
+
+```bash
+ros2 bag record /scan /imu /tf -o bad_range_2026_09_12
+ros2 bag info bad_range_2026_09_12
+ros2 bag play bad_range_2026_09_12 --clock --rate 1.0
+ros2 topic echo /diagnostics
+```
+
+生产记录要注意磁盘、隐私和保留期限；只记录必要 topic，给 bag 名称带设备/版本/时间。回放测试要固定参数文件、节点 namespace 和输出窗口，不能让当前工作区的旧配置悄悄影响结果。自动判定可以比较输出消息数量、错误计数、最大输入年龄、最终状态和控制命令边界。
+
+### 时间、QoS 和确定性
+
+bag 里有消息的原始时间戳，但回放传输仍受 executor 和 QoS 影响。可靠性策略不兼容时，bag 正常播放而订阅者收不到；先用 `ros2 topic info --verbose` 检查端点。节点使用 wall clock 而其它节点使用 simulated clock，会出现超时立即触发或永不触发。对非确定算法固定随机种子，确保处理器只读取明确的输入和参数。
+
+### 常见编译、链接、运行时错误
+
+找不到消息类型先检查接口包和 overlay；C++ 测试节点链接失败看 ament 依赖与生成头文件。回放无输出时依次查 bag topic 名、namespace、QoS、订阅者是否启动以及 `/clock`。结果不同于现场，记录播放 rate、CPU 负载和参数快照；不要通过延长测试超时来掩盖时钟不一致。bag 太大或含敏感数据时使用筛选、脱敏和校验和，并记录它对应的代码版本。
+
+<KeyIdea title="回放要保存时间和上下文">
+  <p>消息序列、时间、TF、QoS、参数和代码版本共同组成可复现输入。rosbag 让现场问题进入测试，但回放环境仍需显式固定。</p>
+</KeyIdea>
+
+## 迁移练习
+
+设计一次“测距偶发负值”的回放测试：记录 `/scan`、`/tf`、`/diagnostics`，记录 QoS 与参数版本；用 `--clock` 回放，统计 invalid 数、输出数量、最大延迟和最终节点状态。把结果写成可重复的命令和自动断言。
+
+<Exercise
+  title="把一次现场异常变成回归 bag"
+  prompt="列出录制 topic、脱敏/保留策略、回放参数、QoS/时钟设置和成功判定；说明如何证明测试没有依赖真实设备。"
+  hint="用 ros2 bag info 验证输入，用 use_sim_time 固定时间语义，用诊断 topic 作为可比较输出。"
+  solution={`记录相关 scan、TF 和诊断，保存消息类型/QoS/代码版本；回放时启动固定参数的处理节点并启用 simulated clock，使用 info 确认数量。成功条件可包括 invalid_count 等于基准、输出数量一致、最大输入年龄不超阈值且节点最终 healthy。`}
+/>
+
+### 记录前先定义证据边界
+
+不要默认把整台机器人所有 topic 都录下来。先列出重现问题必需的 `/scan`、`/imu`、`/tf`、参数和诊断，再检查是否含有图像、音频、个人信息或设备序列号。记录命令本身也应进入实验笔记，包含 ROS 发行版、commit、QoS 和参数哈希。
+
+```bash
+ros2 bag record -o bags/scan-drop-001 \
+  /scan /imu /tf /tf_static /diagnostics
+ros2 bag info bags/scan-drop-001
+```
+
+`ros2 bag info` 的消息数量、起止时间和 topic 类型是第一份证据。若只录到 `/scan` 而没有 `/tf`，后面很可能无法重建空间关系；若录制端 QoS 不兼容，文件为空并不表示传感器没有发布。
+
+### 用仿真时间重现时序
+
+回放时使用 `--clock` 会发布 `/clock`，节点必须通过 `use_sim_time` 采用 ROS time。定时器、message header 和超时判断都要使用同一个时间基准；年龄计算不能把仿真时间和 wall clock 相减。
+
+```bash
+ros2 bag play bags/scan-drop-001 --clock --rate 0.5
+ros2 topic echo /clock
+ros2 topic hz /diagnostics
+```
+
+先以 0.5 倍速观察，再以原速验证。若暂停 bag 后节点仍处理新消息，检查是否有绕过 ROS clock 的 `std::chrono::steady_clock` 定时任务；它可以测执行耗时，却不能代替消息时间。
+
+### 从人工观察到自动回归
+
+回放节点应输出稳定指标，例如输入 1000 条、接受 997 条、过期 2 条、NaN 1 条，处理延迟 p95 为 8 ms。测试程序订阅诊断或结果 topic，等待明确的结束条件，不要用“睡两秒后断言”掩盖机器快慢差异。对算法输出可比较摘要、轨迹误差和计数，不要对浮点数组做过度严格的字节相等。
+
+### bag 问题的排错层次
+
+先确认文件可读和 topic 存在，再确认回放发布端、订阅端 QoS、`use_sim_time`、TF 是否完整，最后才检查算法。修改录制内容或降速不能修复错误的 timestamp 单位；应在日志中同时输出 bag 时间、接收时间、消息序号和 frame。真实机器人回归前，先在脱敏 bag 和仿真中通过，再做低速台架验证。
+
+<SolutionReveal>
+  <p>rosbag 的工程价值是把“现场偶发”变成可重复输入和可比较输出。下一节会用自定义接口把这些消息契约固定下来。</p>
+</SolutionReveal>

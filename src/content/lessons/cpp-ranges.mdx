@@ -1,0 +1,142 @@
+---
+id: cpp-ranges
+slug: ranges-views-and-pipeline-style
+title: "Ranges、View 与管线式处理"
+summary: "用现代 C++ 的惰性 view 组织数据处理，并明确临时对象和生命周期。"
+track: cpp
+order: 13
+durationMinutes: 18
+concepts: [ranges, views, lazy evaluation]
+prerequisites: [cpp-templates]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## Ranges、View 与管线式处理
+
+Python 生成器和 JS 数组链让“过滤后映射”读起来像数据流；C++20 ranges 把这种表达带到静态类型系统，同时保留迭代器边界。对于从 JS/TS 迁移的人，最重要的转变不是记住 `|` 的写法，而是理解“这条管线是否拥有数据、什么时候执行、元素是什么类型”。机器人点云、检测列表和传感器批次往往由回调暂时拥有，view 如果借用了它们，不能像 JS 数组那样默认安全地跨回调保存。
+
+### 学习目标
+
+完成本节后，你应该能够：用 `filter`、`transform`、`take` 组合一个 C++20 view；区分惰性 view、拥有数据的 `std::vector` 和迭代器；检查底层对象生命周期；解释何时应该物化结果；用编译器和 Sanitizer 定位迭代器失效。
+
+### 从数组链到惰性 view
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const result = events
+  .filter(event => event.valid)
+  .map(event => score(event));`}
+  targetLabel="C++"
+  targetLanguage="cpp"
+  target={`auto view = events
+  | std::views::filter([](const Event& e) { return e.valid; })
+  | std::views::transform([](const Event& e) { return score(e); });
+std::vector<double> result(view.begin(), view.end());`}
+/>
+
+`filter` 只决定哪些元素可见，`transform` 在元素被访问时计算分数。若下游只取前 10 个结果，可以再接 `std::views::take(10)`，避免无意义的遍历。若结果要跨回调保存，显式构造 `vector` 物化它，不要把 view 当作拥有数据的容器。
+
+```cpp
+#include <iostream>
+#include <ranges>
+#include <vector>
+
+int main() {
+  const std::vector<int> distances{12, 3, 7, 2, 20};
+  auto near = distances
+    | std::views::filter([](int value) { return value < 10; })
+    | std::views::transform([](int value) { return value * 100; });
+  for (int millimeters : near) std::cout << millimeters << ' ';
+}
+```
+
+使用 `g++ -std=c++20 ranges.cpp -o ranges` 后运行，输出应为 `300 700 200`。这个结果说明 `filter` 先筛选，`transform` 再换算；没有范围循环时，管线不会产生输出。
+
+### View 的生命周期陷阱
+
+```cpp
+#include <ranges>
+#include <vector>
+
+std::vector<double> valid_ranges(const std::vector<double>& input) {
+  auto positive = input | std::views::filter([](double x) { return x > 0.0; });
+  std::vector<double> result;
+  for (const double value : positive) result.push_back(value);
+  return result;
+}
+```
+
+`positive` 借用 `input`，所以这里的消费发生在 `input` 仍然活着时。错误写法是从函数返回 `input | views::filter(...)`：局部输入返回后，调用者拿到的 view 只保存了失效引用。还要注意 `transform` 返回的元素可能是临时值，若保存其引用会产生悬空。ranges 解决遍历组合，不改变 C++ 的寿命规则。
+
+### 迭代器失效与容器修改
+
+```cpp
+#include <iostream>
+#include <ranges>
+#include <vector>
+
+int main() {
+  std::vector<int> samples{1, 2, 3};
+  auto positive = samples | std::views::filter([](int x) { return x > 0; });
+  samples.push_back(4); // 可能扩容，使已有迭代器失效
+  for (int value : positive) std::cout << value << ' ';
+}
+```
+
+不要把“view 是轻量对象”理解成“底层容器怎么改都没事”。如果 `push_back` 触发扩容，正在使用的迭代器可能失效；即使没有崩溃，结果也不再有可靠定义。传感器回调中应先完成输入快照，再在快照上处理，或者让生产者和消费者之间使用上一节介绍的明确所有权协议。
+
+### 物化、借用和返回值设计
+
+```cpp
+#include <ranges>
+#include <vector>
+
+std::vector<float> confidence_copy(const std::vector<float>& scores) {
+  auto valid = scores
+    | std::views::filter([](float score) { return score >= 0.0F; })
+    | std::views::transform([](float score) { return score * score; });
+  return {valid.begin(), valid.end()};
+}
+```
+
+返回 `vector` 的函数把元素复制到自己的存储中，调用方不需要知道 `scores` 的生命周期。若只在当前函数中使用，参数用 `const&` 可以避免复制；若需要异步处理，就必须明确是拷贝、移动，还是由队列共享一个受控的拥有对象。`std::ranges::to` 在工具链支持时更简洁，但理解迭代器构造仍然有助于排错。
+
+### 管线里的类型和副作用
+
+每个 adaptor 都可能改变元素类型，先用 `std::ranges::range_value_t` 或 IDE 检查实际结果。谓词和转换最好是无副作用的纯函数，这样调试时可以单独执行，也不会因重复迭代产生两次日志或统计。view 被多次遍历时可能重新读取硬件镜像或重复计算；对昂贵运算要物化或缓存，而不是凭“惰性更快”猜测。
+
+### 和 JS/TS 的迁移反例
+
+JS 的 `.map()` 通常立刻返回一个新数组；C++ 的 `transform_view` 只保存函数和底层范围。TS 的类型检查也不会告诉你一个对象是否已经被另一个线程修改，C++ 更不能把 `const` 当成跨线程同步。另一个常见反例是把 `std::views::filter` 当成数据库查询：它没有自动缓存结果，第二次遍历可能再次执行传感器转换函数。需要稳定快照时，显式 `std::vector` 才是正确抽象。
+
+### 编译与运行时排错
+
+`operator|` 不匹配通常是缺少 `<ranges>`、编译标准不是 C++20，或左侧不是 range；先检查 `-std=c++20` 和头文件。`cannot bind` 多半是把临时元素绑定到非常量引用。结果为空时，确认 view 是否真的被消费、predicate 是否把 NaN 排除了，以及底层容器是否已被清空。运行时崩溃重点查 view 引用的容器是否扩容或离开作用域。
+
+### 机器人数据管线的验证方法
+
+为每条检测保留 `sequence`、`frame_id` 和时间戳，先用固定输入测试数量和顺序，再用录制的传感器样本检查结果。编译阶段验证标准和头文件；运行阶段打印物化前后的数量、首尾序号和过滤原因；性能阶段比较只取前五条与完整物化的耗时。若结果跨线程传递，还要用 ThreadSanitizer 或代码审查确认输入不会在消费期间被修改。
+
+<KeyIdea title="惰性不等于无成本，view 不等于所有权">
+  <p>ranges 管线让遍历意图更清晰，但数据何时计算、谁拥有底层容器、结果何时物化都要显式决定。先画生命周期，再组合 adaptor。</p>
+</KeyIdea>
+
+## 迁移练习
+
+给定一批 `Detection`，构造“有效、距离小于 10 米、提取置信度”的 view，再用 `take(5)` 限制输出并物化到 `std::vector<float>`。写一个错误示例让底层容器先离开作用域，然后用 Sanitizer 或代码审查解释风险。
+
+<Exercise
+  title="把检测过滤做成安全管线"
+  prompt="实现 filter、第二个 filter、transform 和 take 的组合；要求结果能在原始消息回调结束后继续使用。"
+  hint="view 的消费必须发生在输入仍存活时；跨回调保存时构造新的 vector，而不是保存 view。"
+  solution={`让输入 detections 在同一作用域内创建 view 并立即用范围构造或循环填充 result；过滤有效和距离后再 transform 置信度，最后只取前五个。返回 result 的值副本，避免把引用底层 vector 的 view 带出作用域。`}
+/>
+
+<SolutionReveal>
+  <p>ranges 的安全使用规则可以浓缩成三问：底层数据活多久、管线何时执行、结果是否需要拥有。回答清楚后，下一节的文件和序列化就能决定何时复制消息。</p>
+</SolutionReveal>

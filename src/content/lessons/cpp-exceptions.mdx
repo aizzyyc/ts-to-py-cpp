@@ -1,0 +1,143 @@
+---
+id: cpp-exceptions
+slug: exceptions-errors-and-invariants
+title: "异常、错误与不变量"
+summary: "比较异常、错误码和 optional，建立面向库与应用的失败语义。"
+track: cpp
+order: 11
+durationMinutes: 16
+concepts: [exceptions, error handling, invariants]
+prerequisites: [cpp-move]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+完成本节后，你能区分异常、错误码、optional 和状态对象的适用边界；会写 try/catch、定义不变量和基本异常安全保证；能区分未定义行为与可恢复错误，并为传感器解析、配置加载和机器人节点启动建立可观察的失败路径。
+
+## 从 Promise rejection 到 C++ 失败语义
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'try { await read(); } catch (error) {}'} targetLabel="C++" targetLanguage="cpp" target={'try { read(); } catch (const std::exception& error) {}'} />
+
+JS/TS 常用 throw、Promise rejection 或 Result 风格对象表达失败。C++ 也能 throw，但异常不是一个隐形的返回值：它会沿调用栈寻找 handler，跳过局部作用域时仍会触发 RAII 析构。库接口是否抛异常应该是稳定契约，不能让调用者猜。
+
+反例是把所有失败都 catch(...) 然后继续运行。配置解析失败、消息校验失败和硬件断开可能有完全不同的恢复策略；吞掉异常会让机器人继续使用未初始化参数。另一个反例是把越界、use-after-free 当成“异常情况”，它们是未定义行为，必须用边界检查和 sanitizer 修复。
+
+## 示例一：解析输入并捕获异常
+
+~~~cpp
+#include <iostream>
+#include <stdexcept>
+#include <string>
+
+double parse_range(const std::string& text) {
+  const double value{std::stod(text)};
+  if (value < 0.0) throw std::out_of_range("range must be non-negative");
+  return value;
+}
+
+int main() {
+  try {
+    std::cout << parse_range("1.25") << "\n";
+    std::cout << parse_range("-1") << "\n";
+  } catch (const std::exception& error) {
+    std::cerr << "invalid input: " << error.what() << "\n";
+  }
+}
+~~~
+
+运行先输出 1.25，再输出 invalid input: range must be non-negative，程序仍以捕获后的策略结束。catch 使用 const std::exception&，避免切片和复制。真实命令行程序应根据失败类型返回非零退出码；机器人节点则可能切换到 fault 状态并等待重新连接。
+
+## 示例二：optional 表达“没有结果”
+
+不是每个没有结果都值得抛异常。空传感器窗口是正常情况时，可以返回 optional。
+
+~~~cpp
+#include <optional>
+#include <vector>
+
+std::optional<double> average_valid(const std::vector<double>& values) {
+  double sum{0.0};
+  std::size_t count{0};
+  for (const double value : values) {
+    if (value >= 0.2 && value <= 5.0) {
+      sum += value;
+      ++count;
+    }
+  }
+  if (count == 0) return std::nullopt;
+  return sum / static_cast<double>(count);
+}
+~~~
+
+调用方必须检查 has_value 或使用 value_or，不能直接假设结果存在。optional 适合“可能没有值且原因简单”的情况；如果需要区分空窗口、全部坏点和设备断开，应返回带 error code 或 error message 的状态对象。接口要让失败原因足够可观察。
+
+## 示例三：保持不变量的更新
+
+~~~cpp
+class Battery {
+public:
+  explicit Battery(double percentage)
+      : percentage_{percentage} {
+    if (percentage_ < 0.0 || percentage_ > 100.0) {
+      throw std::out_of_range("battery percentage");
+    }
+  }
+
+  void consume(double amount) {
+    if (amount < 0.0 || amount > percentage_) {
+      throw std::out_of_range("invalid consumption");
+    }
+    percentage_ -= amount;
+  }
+
+  double percentage() const { return percentage_; }
+
+private:
+  double percentage_;
+};
+~~~
+
+对象不变量是 percentage 始终在 0 到 100 之间。构造失败时不产生可用 Battery，更新失败时旧值保持不变，这是强异常安全保证的一个简单例子。验证时测试 -1、101、正常消耗和超过剩余电量四条路径，确认 catch 后对象没有半更新状态。
+
+## 异常安全的三个层次
+
+基本保证表示失败后没有资源泄漏，对象仍可析构；强保证表示操作失败后状态不变；不抛异常保证表示操作无论如何都不抛。RAII 提供资源清理基础，但业务状态仍要通过先验证、后提交或 copy-and-swap 设计。析构函数、noexcept 移动操作和实时控制热路径通常不应抛异常。
+
+## 错误码和边界层
+
+设备驱动、系统调用和网络库常使用错误码，因为调用者需要决定重试、降级还是停机。可以把底层 errno 或 SDK code 转换成内部 enum class，再在应用边界记录上下文。不要把返回值为负的读取接口直接当成正常数据；错误码与数据值应有不同类型或结构体承载。
+
+## 编译、运行与排错
+
+用 c++ -std=c++20 -Wall -Wextra -Wpedantic -g 编译，并为每个失败分支写可复现输入。若异常没有被捕获，检查 throw 到 main 的调用链；若 catch 后程序仍使用坏配置，检查是否在 catch 外继续访问未初始化对象；若 sanitizer 报越界或 use-after-free，不要用 try/catch 包住它，因为未定义行为不是业务异常。日志应包含输入来源、错误类别和恢复动作，但不要打印敏感配置。
+
+## 机器人连接：启动失败与运行时故障
+
+节点启动阶段读取参数、打开串口和加载模型，任一失败都应有明确的退出或 degraded mode；运行阶段收到坏消息时可以丢弃当前消息并保留上一帧，但设备断开通常需要状态机重连。把异常只留在边界层，内部算法尽量使用已验证的数据对象，可以避免每一层都 catch 同一个错误。
+
+<KeyIdea title="先定义失败语义，再选择表达方式">
+  <p>没有结果可以是 optional，预期且可分支的设备状态可以是错误码，需要跨多层传播的意外失败可以是异常；越界和 use-after-free 则不是可捕获的业务失败。</p>
+</KeyIdea>
+
+## 动手练习
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'const value = result ?? fallback;'} targetLabel="C++" targetLanguage="cpp" target={'const double value = result.value_or(fallback);'} />
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'throw new Error("bad frame");'} targetLabel="C++" targetLanguage="cpp" target={'throw std::runtime_error("bad frame");'} />
+
+实现 parse_sensor_line：输入形如 range=1.25,status=good 的文本，返回一个带 value、status 和错误信息的结果。分别处理格式错误、非数字、越界和状态未知，并为 CLI 选择非零退出码，为机器人节点选择 fault 状态。
+
+<Exercise title="设计一条可观察的失败路径" prompt="为传感器配置加载函数选择 exception、optional 还是 error code，并写出四个失败用例的调用方动作。" hint="先问失败是否正常、是否需要原因、调用方能否恢复；不要用异常替代边界检查。" solution="格式错误和设备拒绝可以返回带 error code 的结果；空窗口可返回 optional；启动阶段无法恢复的配置错误可抛到应用边界并以非零码退出；所有访问前先完成范围检查。" />
+
+## 小结与下一步
+
+<SolutionReveal>
+  <p>打开答案后，请把示例改成自己的传感器数据，再用编译器、运行输出和边界输入验证，而不是只对照文字。</p>
+</SolutionReveal>
+
+异常、optional 和错误码的区别在于失败的频率、原因和恢复责任。下一节把这些语义放进 class 和 interface，学习如何让传感器驱动可以替换、测试和组合。

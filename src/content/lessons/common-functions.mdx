@@ -1,0 +1,76 @@
+---
+id: common-functions
+slug: functions-modules-and-errors
+title: "函数、模块与错误处理：让代码可组合"
+summary: "比较 import/export、模块边界、返回值和异常处理的工程取舍。"
+track: common
+order: 3
+durationMinutes: 10
+concepts: [functions, modules, errors]
+prerequisites: [common-values]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 从“能调用”到“可组合”
+
+JS/TS 的函数是一等值，`import/export` 让依赖关系在文件之间可见；Python 的模块也是运行时对象，导入会执行模块顶层代码；C++ 通常把声明放进头文件、实现放进源文件，再由链接器组合目标文件。迁移的关键不是把箭头函数逐字换成 `def`，而是保留“一个函数只承担一个可命名意图”，并让调用方知道失败如何返回。
+
+例如“读取传感器并转换单位”可以拆成 `read_raw`、`parse_reading` 和 `to_celsius`。这样 Python 的数据类、C++ 的 `struct` 或未来的 ROS 消息都能接入同一个纯转换函数。把文件、网络或设备调用藏在纯函数内部，会让测试不得不依赖真实世界，也会让错误堆栈失去边界。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`export function parsePort(value: string): number {
+  return Number.parseInt(value, 10);
+}`}
+  targetLabel="Python"
+  targetLanguage="python"
+  target={`def parse_port(value: str) -> int:
+    return int(value)`}
+/>
+
+### 迁移时先拆纯逻辑和副作用
+
+纯函数接收输入并返回输出，适合三种语言直接测试；读文件、发请求和写日志属于副作用，应放在边缘模块。异常不是“更高级的返回值”，它是控制流的一部分，必须决定在哪一层捕获、补充上下文或继续抛出。对单个非法传感器值可以返回校验错误，对无法连接设备则可以抛出或返回状态，让上层决定重试还是退出。
+
+```python
+def celsius(value: float, unit: str) -> float:
+    if unit == "C":
+        return value
+    if unit == "F":
+        return (value - 32.0) * 5.0 / 9.0
+    raise ValueError(f"unsupported unit: {unit}")
+
+def load_temperature(source) -> float:
+    raw = source.read()
+    return celsius(float(raw.value), raw.unit)
+```
+
+### 模块边界与导入副作用
+
+Python 模块顶层不应连接数据库或启动线程，否则测试只导入函数就会改变环境；C++ 头文件要避免把非 `inline` 的定义重复放入多个翻译单元，否则会出现重复符号；Node 模块要警惕循环依赖导致未完成的导出对象。把组装动作集中到入口，核心模块只暴露少量清楚的函数。
+
+### 常见错误与排错思路
+
+遇到“函数明明存在却不可调用”，先检查导出名、导入路径和循环依赖，再检查是否把默认导出当成命名导出。遇到错误被吞掉，搜索空的 `catch`、只打印字符串的 `except` 或忽略返回值的 C++ 调用；在边界补上操作名和输入标识，保留原始异常作为原因。排错的目标是恢复调用链，而不是把所有失败都改成 `null`。
+
+<KeyIdea title="错误是接口的一部分">
+  <p>不要只迁移成功路径。明确函数会抛异常、返回 <code>None</code>，还是返回一个包含错误信息的结果，调用者才能稳定组合它。</p>
+</KeyIdea>
+
+## 迁移练习
+
+<Exercise
+  title="把失败情况写出来"
+  prompt="把 parse_port 改成：空字符串、非数字输入和超出 1 到 65535 范围的端口都返回明确错误，并说明 Python 与 C++ 模块各自暴露什么接口。"
+  hint="先决定返回值结构，再写实现。例如 { ok: false, error: string }；不要把范围检查散落在调用方。"
+  solution={`解析函数先 trim 并转换，失败返回 port must be an integer，超出范围返回 port must be in 1..65535。Python 可返回 Result 或抛出专用异常，C++ 可返回 expected<int, ParseError>；CLI 层统一转换为退出码。`}
+/>
+
+<SolutionReveal>
+  <p>函数签名、模块边界和错误策略共同构成接口。语言迁移时，把隐含约定写出来，往往比一比一翻译语法更重要；可组合的核心函数应该不依赖终端、网络或当前时间。</p>
+</SolutionReveal>

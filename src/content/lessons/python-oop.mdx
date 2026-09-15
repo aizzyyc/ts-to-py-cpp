@@ -1,0 +1,245 @@
+---
+id: python-oop
+slug: object-model-and-dataclasses
+title: "对象模型、类与 dataclass"
+summary: "把 TypeScript class、interface 和对象组合经验迁移到 Python 数据对象。"
+track: python
+order: 4
+durationMinutes: 14
+concepts: [classes, dataclass, composition, protocol]
+prerequisites: [python-functions]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+完成本节后，你应该能读懂 Python 的 `class`、实例属性和方法调用；能用 `dataclass` 表达经过校验的样本或配置；能选择继承还是组合；能用 `property` 维护派生值和校验边界；能把模型依赖注入对象，并用输入、输出和异常验证对象的不变量。
+
+## 从 JS/TS 迁移的心智模型
+
+TypeScript 的 `interface` 只描述对象形状，运行时不会生成构造器或校验逻辑；Python 的类是运行时对象，类体会创建属性和方法，实例会保存状态。Python 方法的第一个参数通常叫 `self`，它类似 JavaScript/TypeScript 方法中的 `this`，但必须显式写在定义里。调用 `scorer.accept(0.8)` 时，Python 会把 `scorer` 自动传给 `self`。
+
+不要把所有函数都塞进 class。稳定的数据形状适合 dataclass，外部模型、数据库和 HTTP 客户端更适合以依赖注入的方式组合进一个服务对象。对象边界应该保护少数重要不变量，例如阈值在零到一之间、特征不能为空；复杂 JSON 解析、网络重试和训练流程仍应由其他层负责。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`type Batch = { ids: string[]; values: number[] };
+class Scorer {
+  constructor(private threshold = 0.5) {}
+}`}
+  targetLabel="Python"
+  targetLanguage="python"
+  target={`from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class Batch:
+    ids: tuple[str, ...]
+    values: tuple[float, ...]
+
+class Scorer:
+    def __init__(self, threshold: float = 0.5):
+        self.threshold = threshold`}
+/>
+
+### class、实例与 self
+
+`class` 定义的是一类对象的共同行为；`__init__` 在实例创建时运行，用来设置每个实例自己的状态。类属性会被多个实例共享，实例属性写在 `self` 上。下面的阈值属于每个 `ScoreGate`，而不是全局变量；`accept` 只做一个决定，因此可单独测试。
+
+```python
+class ScoreGate:
+    def __init__(self, threshold: float = 0.5) -> None:
+        if not 0 <= threshold <= 1:
+            raise ValueError("threshold must be between 0 and 1")
+        self.threshold = threshold
+
+    def accept(self, score: float) -> bool:
+        return score >= self.threshold
+
+gate = ScoreGate(0.8)
+print(gate.accept(0.7), gate.accept(0.9))
+```
+
+运行结果是 `False True`。创建第二个 `ScoreGate(0.2)` 不会改变第一个实例的阈值；这就是实例状态和类级别共享状态的区别。
+
+### 示例一：用 dataclass 描述不可变配置
+
+`@dataclass` 自动生成 `__init__`、`repr` 和比较方法，让数据对象少写样板代码。`frozen=True` 会阻止通过普通赋值修改实例属性，适合模型名、版本和阈值等配置。它是浅层不可变：如果字段里放入一个 list，list 仍可能被原地修改，所以快照字段优先使用 tuple。
+
+```python
+from dataclasses import dataclass, field
+
+@dataclass(frozen=True)
+class InferenceConfig:
+    model_name: str
+    threshold: float = 0.5
+    labels: tuple[str, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        if not self.model_name:
+            raise ValueError("model_name is required")
+        if not 0 <= self.threshold <= 1:
+            raise ValueError("threshold must be between 0 and 1")
+
+config = InferenceConfig("tiny-v1", 0.75, ("yes", "no"))
+print(config)
+```
+
+输出类似 `InferenceConfig(model_name='tiny-v1', threshold=0.75, labels=('yes', 'no'))`。如果尝试 `config.threshold = 0.9`，会得到 `FrozenInstanceError`；这说明配置的修改必须在构造新对象时发生，而不是请求处理中悄悄改掉共享配置。
+
+### __post_init__ 只守住对象不变量
+
+`__post_init__` 适合做轻量的局部检查，例如长度、范围和非空约束。它不应该悄悄读取文件、加载模型或访问 HTTP，因为这样构造一个对象就会有不可预测的外部副作用。来自 API 的字符串先在解析层转换为 `float`，再交给 dataclass；类型注解不会替你完成转换。
+
+### property：让派生值像属性一样安全访问
+
+`property` 把方法包装成属性访问，类似 TypeScript 的 getter，但 Python 不要求调用者写括号。读属性时可以计算派生结果，写属性时可以校验。不要在 setter 内写回同名属性，否则会递归调用自己；通常使用 `_score` 这样的内部字段。
+
+```python
+class Prediction:
+    def __init__(self, score: float) -> None:
+        self.score = score
+
+    @property
+    def score(self) -> float:
+        return self._score
+
+    @score.setter
+    def score(self, value: float) -> None:
+        if not 0 <= value <= 1:
+            raise ValueError("score must be between 0 and 1")
+        self._score = float(value)
+
+    @property
+    def band(self) -> str:
+        return "positive" if self.score >= 0.5 else "negative"
+
+prediction = Prediction(0.72)
+print(prediction.score, prediction.band)
+```
+
+结果是 `0.72 positive`。模型输出如果超出范围，构造或赋值阶段就会失败；服务层可以把这个错误映射成可定位的输入/模型契约错误。
+
+### 继承：只在替换关系稳定时使用
+
+继承表示“子类可以在需要基类的地方工作”，而不只是“我想复用几行代码”。例如不同重试策略都提供 `delay(attempt)`，这是一种稳定的替换关系。继承层级很深时，状态来源和初始化顺序会变难追踪；如果对象只是拥有另一个对象，组合通常更清晰。
+
+```python
+class RetryPolicy:
+    def delay(self, attempt: int) -> float:
+        return 0.0
+
+class ExponentialRetry(RetryPolicy):
+    def __init__(self, base: float = 0.5) -> None:
+        self.base = base
+
+    def delay(self, attempt: int) -> float:
+        return self.base * (2 ** attempt)
+
+policy: RetryPolicy = ExponentialRetry()
+print([policy.delay(attempt) for attempt in range(3)])
+```
+
+输出 `[0.5, 1.0, 2.0]`。如果线上服务既需要重试又需要熔断，不要继续堆 `RetryPolicy` 子类，可以把两个策略作为独立对象组合。
+
+### 示例二：组合模型与阈值，而不是继承具体模型
+
+Python 的鸭子类型允许对象只要提供所需方法即可被使用；`Protocol` 可以把这个最小接口写给静态检查器。测试中注入 `FakeModel`，线上再注入真实模型，`Predictor` 不必知道权重从哪里加载。
+
+```python
+from typing import Protocol
+
+class Model(Protocol):
+    def predict(self, features: tuple[float, ...]) -> float: ...
+
+class FakeModel:
+    def predict(self, features: tuple[float, ...]) -> float:
+        return sum(features) / len(features)
+
+class Predictor:
+    def __init__(self, model: Model, threshold: float = 0.5) -> None:
+        self.model = model
+        self.threshold = threshold
+
+    def classify(self, features: tuple[float, ...]) -> str:
+        score = self.model.predict(features)
+        return "positive" if score >= self.threshold else "negative"
+
+service = Predictor(FakeModel(), threshold=0.6)
+print(service.classify((0.8, 0.7)))
+```
+
+输入特征平均值为 `0.75`，输出是 `positive`。这个小对象已经能在不下载模型、不连接服务的情况下验证阈值逻辑；组合让替换真实模型的成本保持在边界之内。
+
+## 运行验证：从构造到结果
+
+运行对象示例时，验证三类结果：合法对象的 `repr` 和方法输出、非法参数是否在构造阶段失败、配置或样本是否能被安全序列化。可以用 `python oop_demo.py` 运行脚本，再用断言检查 `Prediction(0.72).band == "positive"`。如果 dataclass 的 `frozen` 行为要被依赖，就实际尝试一次赋值并捕获 `FrozenInstanceError`，不要只凭装饰器名称推测结果。对组合对象，至少替换一次 fake 依赖，确认 `Predictor` 没有偷偷调用真实网络或模型文件。
+
+## 常见错误与排错路径
+
+- 忘写 `self`：方法调用时报参数数量错误时，先检查定义是否为 `def method(self, ...)`。
+- 把请求计数器写成类属性：多个服务实例的计数一起变化时，打印 `id(instance)` 和属性来源，确认状态应属于实例还是全局。
+- dataclass 可变默认值：`labels: list[str] = []` 会被拒绝或造成共享状态，使用 `field(default_factory=list)`；不可变配置则优先 tuple。
+- 误以为 `frozen=True` 深度冻结：嵌套 list 仍可变，构造时转换为 tuple，或明确说明对象只做浅层保护。
+- property setter 递归：setter 中写 `self.score = value` 会再次触发 setter，改写 `_score`。
+- 继承初始化不完整：子类忘记调用 `super().__init__` 时，基类字段可能不存在。若初始化顺序变复杂，优先改为组合。
+- 构造器做太多 I/O：测试创建对象就触发下载或 HTTP 时，把资源加载移到应用启动层，再通过组合注入已准备好的依赖。
+- 共享可变实例：请求之间状态互相污染时，打印 `repr`、`id` 和关键字段，在边界创建新实例或返回不可变快照。
+
+## 练习：定义一条可验证的样本
+
+为传感器分类任务定义 `Sample` dataclass：包含 `sample_id`、不可变的 `features`、`label` 和 `source`。要求特征非空、标签为非负整数，并提供一个返回普通字典的 `as_record` 方法供日志和数据导出使用。验证合法样本、空特征、负标签和修改 frozen 实例四条路径。
+
+<KeyIdea title="对象负责保持不变量，不负责包办系统">
+  <p>dataclass 适合让数据形状显式、构造过程一致；外部 I/O、模型推理和指标记录仍应由独立函数或服务完成。组合让真实依赖和测试 fake 处在同一个最小接口后面。</p>
+</KeyIdea>
+
+### 提示
+
+使用 `@dataclass(frozen=True)`，把 `features` 的类型写成 `tuple[float, ...]`。在 `__post_init__` 中先检查空 tuple 和 label 范围；`as_record` 只返回日志需要的字段，不要把内部缓存放进去。
+
+### 完整答案
+
+<Exercise
+  title="对象模型、类与 dataclass 练习"
+  prompt="实现不可变 Sample dataclass，features 使用 tuple[float, ...]；构造时拒绝空特征和负 label，as_record 返回不含内部缓存的普通字典。"
+  hint="使用 frozen=True 和 __post_init__；不要把 list 作为可变默认值。"
+  solution={`from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class Sample:
+    sample_id: str
+    features: tuple[float, ...]
+    label: int
+    source: str
+
+    def __post_init__(self) -> None:
+        if not self.features:
+            raise ValueError("features must be non-empty")
+        if self.label < 0:
+            raise ValueError("label must be non-negative")
+
+    def as_record(self) -> dict[str, object]:
+        return {
+            "sample_id": self.sample_id,
+            "features": self.features,
+            "label": self.label,
+            "source": self.source,
+        }`}
+/>
+
+<SolutionReveal>
+  <p>检查点包括：合法样本的 as_record 字段完整，空特征和负 label 分别抛出 ValueError，修改 frozen 实例失败。把这些行为写成 pytest 后，后续 Dataset 可以稳定地产生相同形状的记录，不必把校验散落在模型服务里。</p>
+</SolutionReveal>
+
+## 与后续 AI 数据工程的连接
+
+dataclass 可以承载模型配置、已校验样本、批次元数据和预测结果；`property` 可以集中维护阈值、分数区间等不变量；组合允许训练脚本、离线评估和线上模型服务共享同一个最小接口。继承只适合稳定的替换关系，其他差异用策略对象注入更容易 mock。对象负责保证局部状态可信，文件、HTTP 和 GPU 生命周期则留给相应的 I/O 或服务层。
+
+## 小结
+
+Python 面向对象的关键是边界而不是类的数量：`self` 表示实例，dataclass 减少数据样板，`frozen` 保护浅层配置，property 集中校验，继承表达替换关系，组合表达拥有依赖。先验证对象的不变量，再把它接入 AI 数据和模型服务，系统会更容易替换和调试。

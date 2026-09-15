@@ -1,0 +1,87 @@
+---
+id: common-observability
+slug: metrics-traces-and-latency
+title: "指标、追踪与延迟"
+summary: "从“感觉变慢”升级到测量吞吐、延迟、错误率和资源使用。"
+track: common
+order: 22
+durationMinutes: 14
+concepts: [metrics, tracing, latency]
+prerequisites: [common-debugging]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 指标、追踪与延迟
+
+Node 服务常记录请求耗时和错误率。AI 推理和机器人节点还需要关注队列等待、端到端延迟、丢帧和 CPU/内存使用，因此指标必须跟着数据流走。可观察性不是“多打日志”，而是为关键事件定义稳定的指标、日志和追踪关联。先画一条消息从入口到输出的路径，再决定在哪些边界记录时间、状态和资源。
+
+平均值会掩盖尾延迟：一次偶发的 GPU 分配或锁等待可能让 p99 超过控制周期。指标名称、单位和标签要稳定，标签数量也要有限，不能把用户 id 或任意 URL 作为高基数标签。日志保存具体样本的摘要，指标负责聚合趋势，追踪负责一次请求跨组件的时间线。
+
+### 性能优化从一个可测量的问题开始
+
+下面这段代码只保留同一个意图，重点观察输入边界、数据流和失败语义，而不是逐字符翻译。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const start = performance.now();
+const result = await infer(input);
+metrics.observe("infer_ms", performance.now() - start);
+return result;`}
+  targetLabel="Python / C++"
+  targetLanguage="text"
+  target={`# Python
+start = time.perf_counter()
+result = infer(input)
+metrics.observe("infer_seconds", time.perf_counter() - start)
+return result
+
+// C++
+auto start = Clock::now();
+auto result = infer(input);
+metrics.observe("infer_ms", elapsed_ms(start));`}
+/>
+
+### 指标、日志和追踪各自回答什么
+
+指标回答“总体是否变坏”，例如请求数、错误率、p50/p95/p99 延迟、队列深度和丢帧数；结构化日志回答“这条消息为什么失败”，例如 message_id、schema_version 和 error_type；追踪回答“时间花在哪里”，例如排队、预处理、推理和序列化 span。Python 与 C++ 的采集库不同，但字段命名和关联 id 应由系统契约统一。
+
+```python
+start = time.perf_counter()
+with tracer.start_as_current_span("infer") as span:
+    span.set_attribute("model_version", model_version)
+    result = model.predict(batch)
+elapsed_ms = (time.perf_counter() - start) * 1000
+metrics.histogram("infer_latency_ms", elapsed_ms, {"model": model_name})
+```
+
+### 端到端延迟与资源指标
+
+为每条消息记录产生时间、入队时间、开始处理时间和输出时间，才能分开测量采集延迟、队列等待、推理耗时和发送耗时。机器人系统要监控 deadline miss、丢弃原因和传感器频率；AI 服务要监控批大小、GPU 显存、模型加载次数和输入 shape。不要把所有字段都作为标签，详细内容放在采样日志或追踪事件里。
+
+### 常见错误与排错思路
+
+常见错误是只测函数耗时，忽略排队和序列化；或者使用本地时钟比较跨机器事件，导致时间线倒退。排错时先用同一个 message_id 找到入口、队列、推理和输出四个事件，再比较 p95 与单个慢样本；若指标暴增，检查标签是否把 request id 当维度。时间测量用单调时钟，墙上时间只用于跨系统展示。
+
+<KeyIdea title="性能优化从一个可测量的问题开始">
+  <p>可观察性是迁移基础的收束点：它让 Python 和 C++ 的性能、可靠性都能被验证。为每项测量写清单位、边界和关联 id，结果才可比较。</p>
+</KeyIdea>
+
+## 迁移练习
+
+请完成：为传感器到推理结果的链路选择三个核心指标、两个日志字段和一个追踪 span，写出它们的单位、标签与采样策略。
+
+<Exercise
+  title="指标、追踪与延迟练习"
+  prompt="为传感器到推理结果的链路选择三个核心指标、两个日志字段和一个追踪 span，写出它们的单位、标签与采样策略。"
+  hint="至少包含一个延迟指标、一个失败指标和一个积压指标；避免把 message_id 作为指标标签。"
+  solution={`指标可选 end_to_end_latency_ms 的 p95、validation_errors_total、queue_depth；标签只用低基数的 model_version 或 error_type。日志带 message_id 和 input_shape，追踪包含 queue_wait 与 infer span，详细慢样本按比例采样。`}
+/>
+
+<SolutionReveal>
+  <p>可观察性是迁移基础的收束点：它让 Python 和 C++ 的性能、可靠性都能被验证。完成后，请用一条固定消息走完整条链路，确认指标、日志和追踪能通过关联 id 对上。</p>
+</SolutionReveal>

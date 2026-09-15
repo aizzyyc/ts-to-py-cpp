@@ -1,0 +1,166 @@
+---
+id: cpp-sensor-pipeline
+slug: project-sensor-message-pipeline
+title: "小项目：传感器消息处理器"
+summary: "把传感器数据、QoS、所有权、诊断和消息循环组合成一个可测试的 C++ 处理器。"
+track: cpp
+order: 36
+durationMinutes: 18
+concepts: [project, sensors, messages, testing, diagnostics]
+prerequisites: [cpp-tracing]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 小项目：传感器消息处理器
+
+最后把课程串成一个不依赖真实硬件的处理器：接收带 `sensor_id`、`timestamp`、`value` 和质量的消息，拒绝 NaN/越界/过期读数，按传感器保存最新状态，提供只读查询、丢弃计数和可诊断状态。它是机器人系统的安全缩小版，不发布真实速度、不连接设备，也不等于完成实机验收；重点是把值语义、容器、RAII、队列、时间、QoS/诊断边界和测试组合起来。
+
+## 学习目标
+
+- 能把 JS/TS 的 `Map` 和事件回调迁移成带值语义、时间规则、所有权和有界队列的 C++ 处理器。
+- 能把 ROS 2 subscription、QoS、TF、诊断和线程关闭隔离在适配器边界。
+- 能用 fake clock、固定消息序列、Sanitizer 和 bag 回放验收传感器处理链路。
+
+### 从 Map 到有时间规则的 store
+
+<CompareCode
+  sourceLabel="JS / TS 心智模型"
+  sourceLanguage="typescript"
+  source={`const latest = new Map<string, Reading>();
+function onMessage(reading: Reading) {
+  if (Number.isFinite(reading.value) && reading.value >= 0) {
+    latest.set(reading.sensorId, reading);
+  }
+}`}
+  targetLabel="现代 C++"
+  targetLanguage="cpp"
+  target={`class SensorStore {
+public:
+  bool on_message(Reading reading);
+  std::optional<Reading> latest(SensorId id) const;
+private:
+  std::unordered_map<SensorId, Reading> latest_;
+};`}
+/>
+
+C++ 版本还要决定 Reading 是按值传入并移动，还是只读借用；store 是否单线程拥有 map，或用 mutex 提供快照；旧 timestamp 是否拒绝覆盖新值；消息年龄用设备时间还是统一时钟。把这些决策写成函数结果和诊断计数，调用者就能知道“未更新”是 invalid、stale、duplicate 还是 unknown sensor。
+
+### 建议的模块和数据流
+
+```cpp
+struct Reading {
+  std::string sensor_id;
+  std::uint64_t stamp_ns{};
+  double value{};
+};
+
+class SensorStore {
+public:
+  bool accept(Reading reading, std::uint64_t now_ns) {
+    if (!std::isfinite(reading.value) || reading.value < 0.0) return false;
+    if (now_ns > reading.stamp_ns && now_ns - reading.stamp_ns > max_age_ns_) return false;
+    auto& slot = latest_[reading.sensor_id];
+    if (slot.stamp_ns > reading.stamp_ns) return false;
+    slot = std::move(reading);
+    return true;
+  }
+private:
+  std::uint64_t max_age_ns_{200'000'000};
+  std::unordered_map<std::string, Reading> latest_;
+};
+```
+
+真实代码需补 `<cmath>`, `<cstdint>`, `<string>`, `<unordered_map>` 和并发边界。推荐拆成 `reading.hpp` 值类型、`sensor_store.hpp/.cpp` 校验/最新值、`bounded_queue.hpp` 队列、`message_loop.cpp` 线程和关闭、`diagnostics` 统计、`tests/` 测试矩阵。store 最好由一个 worker 独占 map；查询跨线程时返回值快照，避免把内部元素引用给调用者。
+
+### 把 ROS 2 适配器放在外圈
+
+ROS 2 subscription 只负责把 `sensor_msgs` 转成普通 `Reading`、记录 message ID/QoS 与接收时间，然后入有界队列；worker 调用 store，诊断发布器输出 accepted/rejected/stale/dropped 和输入年龄。真实实现可使用 `SensorDataQoS`，但核心测试不应需要 DDS。队列关闭时先停止订阅，再唤醒 worker，等待退出，最后释放 store/diagnostics 资源。参数如最大年龄、允许范围和传感器 ID 列表从 launch 注入。
+
+### 测试和观测验收
+
+至少测试：有效读数更新、NaN/负值/过大值拒绝、旧时间戳不覆盖新值、相同时间戳的重复策略、未知 ID、查询缺失返回空、队列满的丢弃计数、关闭不会永久阻塞。用 fake clock 固定年龄，用 deterministic message sequence 固定顺序；用 sanitizer 检查所有权，TSan 检查查询与 worker 的同步。为每条消息记录 stamp、received、process begin/end 和 outcome，才能计算年龄与处理延迟。
+
+### 常见编译、链接、运行时错误
+
+模板/头文件错误先检查 include 和命名空间；链接错误看 `.cpp` 是否进入 core/worker target。运行时最新值不更新，先区分 topic/QoS 没有输入、解析失败、消息过期还是 timestamp 单位错误。查询偶发崩溃通常是返回内部引用或 store 已关闭；worker 退出卡住则查 queue close 是否唤醒。诊断计数与日志对不上时，确保每条消息只有一个最终 outcome，避免在适配器和 store 重复计数。
+
+<KeyIdea title="核心逻辑先脱离设备可测">
+  <p>用普通值消息、独占 store、有界队列和 fake clock 固定行为；ROS 2/QoS/SDK 只做外圈适配。这样现场问题能用 bag 或固定序列重现，修复也不会依赖硬件在线。</p>
+</KeyIdea>
+
+## 迁移练习
+
+从 `Reading` 和 `SensorStore` 开始实现项目：为每条消息返回 accepted/rejected 原因，保存每个传感器最新值；再加容量有限的 worker 队列、可停止线程和诊断统计。写测试覆盖合法、过期、异常、重复、缺失查询、满队列和关闭，并列出以后接 ROS 2 时的 subscription/QoS/参数适配边界。
+
+<Exercise
+  title="完成传感器消息处理器验收"
+  prompt="列出并实现至少八条可自动验证条件，覆盖值校验、时间顺序、最新值、所有权、队列背压、线程关闭、诊断和测试；用固定输入证明结果。"
+  hint="每条消息只能有一个 outcome；用 fake clock 测年龄，用值快照跨线程查询，用 close 唤醒等待者。"
+  solution={`有效且更新的 Reading 才覆盖 slot；NaN/越界/过期/旧序号分别拒绝并递增原因计数；未知 sensor 查询返回 optional 空。队列有界并记录 dropped，close 先停止输入、唤醒并 join worker；测试在 ASan/UBSan/TSan 配置中运行，诊断包含 received/accepted/rejected/stale/queue_depth 与输入年龄。`}
+/>
+
+### 交付检查清单
+
+把项目交给下一位机器人工程师前，除了“单元测试通过”，还要说明消息契约、时间来源和关闭行为。输入适配器应把 ROS 2 消息的 frame、stamp、QoS 和序号转换为普通 Reading；核心 store 不应知道 DDS，也不应返回内部容器引用。若要接真实传感器，先用 bag 重放同一序列，再在仿真中检查延迟和丢失，最后在限速台架验证设备断连和急停。这样每一层失败都有可定位的边界。
+
+一个实用的验收报告要包含：基准输入的消息数量和哈希、参数与最大年龄、每种 outcome 的计数、队列最大深度、worker 的退出时间、Sanitizer 配置、trace 事件和已知限制。遇到“最新值错误”时，按解析、时间单位、旧消息拒绝、锁保护和查询快照逐层排查；不要直接把所有消息复制两次来压住症状。
+
+```text
+valid_new      -> stored=true, accepted+=1
+invalid_nan    -> stored=false, rejected_nan+=1
+stale_old      -> stored=false, stale+=1
+older_sequence -> stored=false, duplicate_or_old+=1
+queue_full     -> stored=false, dropped+=1
+shutdown       -> producer_stopped, worker_joined=true
+```
+
+这张矩阵确保每条消息只有一个最终结果，并把业务指标和线程生命周期放在同一份证据里。若诊断计数和测试输出不一致，优先检查重复计数和关闭竞态；若构建能过但运行崩溃，分别用 ASan 查内存、TSan 查同步、bag 查输入，避免把工具混成一个模糊的“调试模式”。
+
+### 写出 ROS 2 适配器的三个边界
+
+第一层从 `sensor_msgs` 读取 `header.stamp`、`frame_id`、QoS 诊断和设备字段，转换成 `Reading`；第二层的有界队列负责背压和关闭；第三层 `SensorStore` 只处理值、时间顺序和业务 outcome。这样核心测试不需要 DDS，也不会把 ROS message 的共享生命周期泄漏到 worker 线程。
+
+```cpp
+void on_scan(sensor_msgs::msg::Range::ConstSharedPtr msg) {
+  Reading reading{
+    .sensor_id = sensor_id_,
+    .stamp_ns = to_nanoseconds(msg->header.stamp),
+    .value = msg->range,
+  };
+  if (!queue_.try_push(std::move(reading))) {
+    diagnostics_.dropped_queue_full++;
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                         "sensor queue is full");
+  }
+}
+```
+
+适配器应记录“收到消息”，store 才决定 accepted/rejected；同一条消息不能在两个层重复递增业务计数。QoS 选择和 `frame_id` 校验在边界完成，store 不需要知道 DDS。
+
+### 用 fake clock 和固定输入证明时间规则
+
+生产代码使用 clock abstraction，让测试可以推进时间而不等待真实秒数。输入序列应包含新读数、旧读数、相同 timestamp、未来 timestamp、NaN、过期值和未知传感器，测试每条消息唯一 outcome，并断言最新值没有被旧消息覆盖。
+
+```cpp
+FakeClock clock{1'000'000'000};
+SensorStore store{500'000'000};
+CHECK(store.accept({"front", 900'000'000, 0.8}, clock.now()));
+CHECK_FALSE(store.accept({"front", 400'000'000, 0.7}, clock.now()));
+CHECK_EQ(store.latest("front")->value, 0.8);
+```
+
+### 队列关闭和线程 join
+
+停止顺序决定程序能否可靠退出：先停止 subscription 和 producer，再调用 queue.close() 唤醒等待者，worker 处理完允许的尾部消息后退出，最后 `join()` 并释放 store。析构函数里不能依赖某个还未运行的 ROS callback 来唤醒线程；否则 launch 关闭或异常时会永久卡住。
+
+### 从 bag 到仿真的验收报告
+
+先用固定序列测纯 C++ 核心，再用 bag 回放检查 ROS 适配器、QoS、TF 和时间，最后在仿真中检查频率、延迟和断连恢复。真实传感器只在限速台架验证，报告应写清输入消息数、accepted/rejected/stale/dropped、最大队列深度、p95 延迟、线程退出时间和未覆盖的硬件故障。
+
+<SolutionReveal title="C++ / Robotics 路线结论">
+  <p>你已经把 JS/TS 的事件流经验迁移成了有类型、所有权、时间、QoS、线程和诊断契约的消息处理器。进入 ROS 2 真实项目时，继续保持“核心逻辑可脱离设备测试，适配器隔离在边界，现场问题可用 bag 重放”的结构。</p>
+</SolutionReveal>

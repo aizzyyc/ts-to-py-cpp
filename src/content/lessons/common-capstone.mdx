@@ -1,0 +1,91 @@
+---
+id: common-capstone
+slug: cross-language-data-contract-project
+title: "综合项目：跨语言数据契约"
+summary: "设计一个 JS/TS 生产数据、Python 清洗、C++ 消费的可演进消息契约。"
+track: common
+order: 26
+durationMinutes: 24
+concepts: [capstone, data contract, interop]
+prerequisites: [common-architecture]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 综合项目：跨语言数据契约
+
+最后一个公共项目不要求你立刻部署真实模型或机器人，而是先完成一条可观察、可测试、可演进的数据链：JS/TS 生成事件，Python 校验和聚合，C++ 模拟实时消费者。这个项目把前面的运行时、类型、模块、文件/HTTP、并发、进程、内存、序列化、测试、调试、安全和指标串在同一条链路上。重点不是代码量，而是每个边界都能说明输入、输出、失败和观察方式。
+
+建议先用本地文件或 stdin 代替真实消息系统，再逐步加入 HTTP 或队列。JS/TS 生产固定的 `event_id`、版本、单位和 UTC 时间；Python 把原始消息转换成已验证的内部模型并输出聚合特征；C++ 只消费稳定协议，拒绝过期或非法消息。所有组件共享一组脱敏样例，才能离线复现并比较三种语言的结果。
+
+### 把迁移基础串成一条可运行的链路
+
+下面这段代码只保留同一个意图，重点观察输入边界、数据流和失败语义，而不是逐字符翻译。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const event = {
+  id: crypto.randomUUID(),
+  value: reading,
+  unit: "mm",
+  timestamp: Date.now()
+};
+await send(event);`}
+  targetLabel="Python / C++"
+  targetLanguage="text"
+  target={`# Python
+event = validate(raw_event)
+features = aggregate(event_stream)
+write_json(features)
+
+// C++
+auto message = decode(payload);
+if (message.valid()) consumer.accept(message);`}
+/>
+
+### 先定义协议和失败路径
+
+协议至少包含 `version`、`event_id`、`timestamp_ms`、`unit`、`value`，并说明大小、精度、可选字段和版本兼容规则。Python 遇到缺失字段或非法单位时返回带字段名的错误；C++ 遇到过期、重复或超大消息时拒绝并记录原因；JS/TS 生产者要处理发送失败和重试。不要让消费者通过猜字段含义来“兼容”，兼容逻辑要写成测试。
+
+```python
+def process(raw: dict, now_ms: int) -> dict:
+    if raw.get("version") != 1:
+        raise ValueError("unsupported version")
+    age_ms = now_ms - raw["timestamp_ms"]
+    if age_ms < 0 or age_ms > 10_000:
+        raise ValueError("event is outside freshness window")
+    if raw.get("unit") != "mm" or not isinstance(raw.get("value"), (int, float)):
+        raise ValueError("invalid reading")
+    return {"event_id": raw["event_id"], "value": float(raw["value"])}
+```
+
+### 分阶段实现和观察
+
+第一阶段让 JS/TS 写 JSONL，Python 读取 stdin 并输出 JSONL，C++ 读取输出并统计接受/拒绝数；第二阶段再替换成 HTTP 或消息队列。每一段用 request/event id 串联日志，记录处理耗时、队列深度和错误类别。将硬件时钟、随机性和网络替换成固定 fake，避免项目只能在一台机器上演示。
+
+### 常见错误与排错思路
+
+常见错误是三个组件各自使用不同时间单位，或 Python 修正了字段后 C++ 仍按旧 schema 读取；另一个是失败消息被重试后产生重复聚合。排错时从同一个 `event_id` 追踪原始 payload、转换结果和最终动作，比较版本、字节数、时间戳和错误码；用一条过期消息、一条缺字段消息和一条正常消息逐步运行。若结果不一致，先锁定序列化边界，再看算法。
+
+<KeyIdea title="把迁移基础串成一条可运行的链路">
+  <p>完成这条链路后，你已经具备进入 Python AI 数据处理或 C++ 机器人消息系统的共同基础。真正的验收标准是：消息可回放、失败可定位、版本可演进。</p>
+</KeyIdea>
+
+## 迁移练习
+
+请完成：画出 JS/TS、Python 和 C++ 三个组件之间的数据流，并实现一条 happy path 与两条失败路径；为每个边界添加测试和至少三个可观察字段。
+
+<Exercise
+  title="综合项目：跨语言数据契约练习"
+  prompt="画出 JS/TS、Python 和 C++ 三个组件之间的数据流，并实现一条 happy path 与两条失败路径；为每个边界添加测试和至少三个可观察字段。"
+  hint="失败路径可以选字段缺失和消息过期；每个组件都要返回可定位的错误，并保留固定输入以便回放。"
+  solution={`事件带 version、event_id、timestamp_ms、unit 和 value；Python 校验并输出 features；C++ 拒绝过期、重复或非法消息；日志串联 event_id、schema_version 和 stage，指标记录 accepted_total、rejected_total 与 processing_latency_ms。`}
+/>
+
+<SolutionReveal>
+  <p>完成这条链路后，你已经具备进入 Python AI 数据处理或 C++ 机器人消息系统的共同基础。把正常消息和两条失败消息保存成回放样例，未来更换传输协议或模型时仍能验证兼容性。</p>
+</SolutionReveal>

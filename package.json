@@ -1,0 +1,25 @@
+{
+  "name": "langshift",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build && pagefind --site dist",
+    "preview": "astro preview",
+    "check": "astro check",
+    "test": "node --experimental-strip-types --test tests/progress.test.ts tests/lessons.test.ts tests/layout.test.ts tests/content.test.ts tests/routes.test.ts tests/search.test.ts",
+    "test:watch": "node --experimental-strip-types --test --watch tests/progress.test.ts tests/lessons.test.ts tests/layout.test.ts tests/content.test.ts tests/routes.test.ts tests/search.test.ts"
+  },
+  "dependencies": {
+    "@astrojs/mdx": "^4.3.0",
+    "astro": "^5.13.0"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.4",
+    "@types/node": "^22.15.0",
+    "pagefind": "^1.5.2",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}

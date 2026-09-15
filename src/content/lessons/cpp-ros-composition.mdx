@@ -1,0 +1,131 @@
+---
+id: cpp-ros-composition
+slug: ros2-composition-and-intra-process
+title: "ROS 2 组件化与进程内通信"
+summary: "理解 component、容器和 intra-process communication，减少机器人节点间不必要的拷贝。"
+track: cpp
+order: 31
+durationMinutes: 20
+concepts: [composition, components, intra-process]
+prerequisites: [cpp-ros-custom]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## ROS 2 组件化与进程内通信
+
+前端模块可以在同一进程组合，微服务也可以拆成进程；ROS 2 component 让节点在运行时装入 component container。组件化减少进程启动和序列化开销，intra-process communication 还可能减少同进程消息复制，但代价是节点共享崩溃域、线程和内存压力。它是部署选择，不应改变业务接口的职责。
+
+## 学习目标
+
+- 能把 JS/TS 的模块组合迁移成接受 `NodeOptions`、可被 container 装载的 ROS 2 component。
+- 能解释 intra-process communication 如何影响拷贝、所有权、线程和故障隔离。
+- 能用 component CLI、topic 证据和 benchmark 验证动态装载没有改变业务契约。
+
+### 从 compose 到 NodeOptions
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  targetLabel="C++ / ROS 2"
+  targetLanguage="cpp"
+  source={`const pipeline = compose(readSensor, filter, publish);
+pipeline.start();`}
+  target={`class FilterNode : public rclcpp::Node {
+public:
+  explicit FilterNode(const rclcpp::NodeOptions& options);
+};
+RCLCPP_COMPONENTS_REGISTER_NODE(FilterNode)`}
+/>
+
+构造函数接收 `NodeOptions`，使参数、remapping、intra-process 选项由 launch/container 装配，而不是硬编码在 `main`。节点组件仍应拥有自己的 publisher、subscription 和 timer；不要把另一个组件的 private 状态暴露出来来换取“零复制”。消息是否真正零复制还取决于类型、allocator、executor 和发布方式，需测量确认。
+
+### 一个可加载的组件骨架
+
+```cpp
+#include <rclcpp/rclcpp.hpp>
+#include <rclcpp_components/register_node_macro.hpp>
+
+class FilterNode : public rclcpp::Node {
+public:
+  explicit FilterNode(const rclcpp::NodeOptions& options)
+      : Node{"filter_node", options} {
+    // 创建 publisher/subscription；业务逻辑保持在独立 Filter 类中
+  }
+};
+
+RCLCPP_COMPONENTS_REGISTER_NODE(FilterNode)
+```
+
+CMake 要生成共享库、链接 `rclcpp`/`rclcpp_components`，再调用 `rclcpp_components_register_nodes(filter_component "FilterNode")`。如果业务核心是普通 C++ 类，独立可执行节点和 component 都可以复用它，测试也不需要启动容器。组件构造失败时要返回可诊断错误或让加载失败，不要构造出半初始化节点。
+
+### 进程内外的取舍
+
+组合容器适合高吞吐传感器管线、同版本模块和可控的单机部署；独立进程适合需要故障隔离、不同发布节奏或安全权限边界的组件。intra-process 开启后仍要关注回调线程、消息所有权和容器生命周期。一个插件崩溃会带走整个容器，不能只用“少一次拷贝”衡量收益。
+
+### 常见编译、链接、运行时错误
+
+编译找不到注册宏，检查 `rclcpp_components` 依赖；链接找不到 component 符号，检查共享库导出和 target 注册。容器列不出组件时查 plugin description、install 路径、类名和 overlay。组件能加载但 topic 不工作，核对 NodeOptions 的 namespace/remap 和 QoS。组合后偶发竞态要按多线程 executor 审查，不能因为节点原本单进程运行就假设状态安全。
+
+<KeyIdea title="组件化改变部署，不改变所有权边界">
+  <p>让节点通过 NodeOptions 接收装配配置，让业务核心保持可单测；只有测量证明收益时才开启进程内优化，并评估共享故障域。</p>
+</KeyIdea>
+
+## 迁移练习
+
+把一个过滤器拆成普通 `Filter` 类和 `FilterNode` component：component 只负责 ROS 资源与参数，核心类负责值消息转换。为独立进程和组合容器各写启动方案，比较延迟、内存、故障隔离和调试方式。
+
+<Exercise
+  title="把过滤节点改造成可加载组件"
+  prompt="写出 NodeOptions 构造函数、组件注册和 CMake target 关系；列出启用 intra-process 前后需要测量的指标。"
+  hint="先让核心逻辑不依赖 main；检查共享库导出、plugin description、topic remap、QoS 和 executor。"
+  solution={`FilterNode 接收 NodeOptions 并注册到共享库，普通 Filter 处理输入值，独立 executable 可复用同一类。测量端到端延迟、拷贝/分配、RSS、回调线程与崩溃影响；若容器共享故障域不可接受，则保留独立进程。`}
+/>
+
+### 把节点写成可装载 component
+
+组件必须有公开构造函数、接受 `rclcpp::NodeOptions`，并通过宏导出类名。下面的类仍可被普通 `main()` 使用，也可以被 component container 动态加载。
+
+```cpp
+class FilterComponent : public rclcpp::Node {
+public:
+  explicit FilterComponent(const rclcpp::NodeOptions& options)
+  : Node("filter", options) {
+    pub_ = create_publisher<std_msgs::msg::Float32>("/filtered", 10);
+    sub_ = create_subscription<std_msgs::msg::Float32>(
+      "/raw", 10, [this](std_msgs::msg::Float32::ConstSharedPtr msg) {
+        if (std::isfinite(msg->data)) pub_->publish(*msg);
+      });
+  }
+private:
+  rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr pub_;
+  rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr sub_;
+};
+
+RCLCPP_COMPONENTS_REGISTER_NODE(FilterComponent)
+```
+
+编译后用 `ros2 component types` 确认注册，`ros2 component load /ComponentManager filter_pkg FilterComponent` 动态加载，再用 `ros2 node list` 和 `ros2 node info /filter` 验证资源确实出现。
+
+### intra-process 减少复制但改变风险边界
+
+开启 `use_intra_process_comms` 后，同一进程内的 publisher/subscriber 可能传递拥有者而不是序列化后的副本，适合图像、点云和大数组流水线。但组件共享一个崩溃域；任何未捕获异常、全局状态或越界写都可能影响整个 container。先用普通 topic 契约测试正确性，再用 benchmark 比较复制次数、延迟和峰值内存。
+
+### 容器、命名空间和参数装配
+
+多个 component 放入同一个容器时，节点名、namespace、参数和 remapping 必须在 launch 中显式指定。不要依赖类名推断 topic；检查 `ros2 node list`、`ros2 topic list` 和 `ros2 component list /ComponentManager`。需要隔离故障的驱动可以放在独立进程，核心算法链再考虑进程内通信。
+
+### 线程模型和所有权
+
+component container 常配合 `MultiThreadedExecutor`，这意味着不同组件回调可能并行，甚至同一组件不同 callback group 也可能重入。成员缓存应归一个 callback group 或 worker 所有；互斥锁要短，不要在锁里做 DDS publish、文件 I/O 或模型推理。卸载组件前停止 timer 和订阅，等待异步任务结束，否则动态卸载后回调仍可能访问已释放对象。
+
+### 性能和崩溃的诊断路径
+
+若组合后延迟下降但偶发崩溃，先禁用 intra-process 比较是否为所有权错误；若 CPU 升高，记录序列化、拷贝、回调和内存分配时间；若无法加载，检查 plugin registration、共享库路径、符号和 `NodeOptions` 构造函数。用 ASan 检查越界和 use-after-free，用 trace 记录消息跨组件的时间线，不能只凭“组件启动成功”判断部署正确。
+
+<SolutionReveal>
+  <p>组件化的成熟用法是让部署可变、核心接口稳定，且能用数据证明进程内通信的收益。下一节会进一步分析 QoS 怎样决定传感器可靠性。</p>
+</SolutionReveal>

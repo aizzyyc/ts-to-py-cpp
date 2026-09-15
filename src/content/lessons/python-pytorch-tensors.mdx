@@ -1,0 +1,239 @@
+---
+id: python-pytorch-tensors
+slug: pytorch-tensors-and-autograd
+title: "PyTorch Tensor 与 autograd"
+summary: "从 NumPy 数组迁移到 Tensor、设备和自动微分，理解训练为何需要梯度。"
+track: python
+order: 23
+durationMinutes: 18
+concepts: [pytorch, tensors, autograd]
+prerequisites: [python-datasets]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+本节把 NumPy 数组接到 PyTorch 的训练图上。完成后你能够：
+
+- 检查 Tensor 的 shape、dtype、device 和 requires_grad，解释它们各自的责任。
+- 正确处理特征浮点类型、分类标签 long 类型以及 logits 的输出维度。
+- 在 CPU/GPU 之间移动成批数据，避免 device mismatch 和不必要的拷贝。
+- 用 autograd 计算梯度，知道 detach、no_grad 和 inference_mode 什么时候该用。
+
+## 从 JS/TS 迁移的心智模型
+
+JavaScript/TypeScript 中一个对象通常只描述值，计算过程由函数调用决定。PyTorch Tensor 还携带设备和自动微分元数据：它可能在 CPU 或 CUDA 上，可能连接到一张计算图，也有严格的 dtype 和 shape。把一个 NumPy 数组送进模型，不只是调用 tensor(values)，而是要决定复制还是共享、放在哪里、是不是需要梯度。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const x = tensor(values);
+const logits = matmul(x, weights);
+const loss = mean(square(logits - target));`}
+  targetLabel="Python / PyTorch"
+  targetLanguage="python"
+  target={`x = torch.as_tensor(values, dtype=torch.float32, device=device)
+logits = x @ weights
+loss = ((logits - target) ** 2).mean()
+loss.backward()`}
+/>
+
+<KeyIdea title="Tensor 元数据是运行时契约">
+  <p>shape 决定运算，dtype 决定解释，device 决定数据位置，requires_grad 决定是否追踪梯度。四者任意一个错，模型结果或资源成本都会出问题。</p>
+</KeyIdea>
+
+## Tensor 的 shape、dtype 与 device
+
+对于分类模型，输入通常是 batch、features，线性层输出 batch、classes，标签通常是 batch 的一维 long Tensor。不要把标签写成 float32 后直接交给 CrossEntropyLoss；不要把单条样本 batch、features 写成 features 而让模型猜。语音和图像还会增加 time、channel、height、width 轴，进入每个 Module 前都应有 shape 说明。
+
+dtype 不只是内存大小。float32 通常用于模型计算，float16/bfloat16 需要混合精度策略；整数索引和分类标签有自己的要求。device 必须一致，CPU Tensor 与 CUDA 权重不能直接相乘。to(device) 返回一个 Tensor，不能假设原对象已经移动。
+
+### 示例一：显式创建和检查 Tensor
+
+```python
+import torch
+from torch import nn
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+features = torch.tensor(
+    [[0.2, 10.0, 0.4], [0.9, 30.0, 1.2]],
+    dtype=torch.float32,
+    device=device,
+)
+labels = torch.tensor([0, 1], dtype=torch.long, device=device)
+model = nn.Linear(3, 2).to(device)
+logits = model(features)
+
+print({
+    "device": str(logits.device),
+    "features": tuple(features.shape),
+    "logits": tuple(logits.shape),
+    "feature_dtype": str(features.dtype),
+    "label_dtype": str(labels.dtype),
+})
+assert logits.shape == (2, 2)
+assert labels.shape == (2,)
+```
+
+输出中的 device 可能是 cpu 或 cuda，但 features、labels、model 参数和 logits 必须一致。这里 batch 是 2、features 是 3、classes 是 2；如果输出成 (2,)，说明模型头或 loss 的契约写错了，训练不应该继续。
+
+## NumPy 互操作和所有权
+
+torch.from_numpy 通常与 NumPy 数组共享内存，NumPy 原地修改会改变 Tensor；torch.tensor 会复制数据，成本更高但边界更独立；torch.as_tensor 可能复用。数据准备阶段要明确是否允许共享，尤其是 DataLoader worker 和异步预取存在时。调用 numpy 要求 Tensor 在 CPU 且不在需要梯度的图上，常见写法是 tensor.detach().cpu().numpy()。
+
+从 GPU 拷贝到 CPU 需要同步和时间，不能在每个训练 step 都把完整 logits 转成 NumPy 只为打印。调试时只抽样、按间隔记录，生产推理则把输出转换成 JSON 可序列化的 Python 数值并控制 batch 大小。
+
+### 示例二：观察共享内存和形状变换
+
+```python
+import numpy as np
+import torch
+
+array = np.arange(6, dtype=np.float32).reshape(2, 3)
+shared = torch.from_numpy(array)
+copied = torch.tensor(array, dtype=torch.float32)
+
+array[0, 0] = 99
+print(shared[0, 0].item(), copied[0, 0].item())
+
+column = shared[:, :1]
+expanded = column.expand(-1, 3)
+print(tuple(column.shape), tuple(expanded.shape))
+```
+
+输出的 shared 第一项会变成 99，copied 仍保留 0，说明两者所有权不同。expand 可能返回共享存储的 view，不能对重叠位置做任意原地写入；需要独立写入时使用 clone。shape 看起来相同不代表内存语义相同。
+
+## autograd：梯度来自计算图
+
+requires_grad=True 的浮点叶子 Tensor 会被 autograd 追踪。前向得到 loss 后，loss.backward() 计算每个参数的 gradient；optimizer 还没有参与，本次调用只是在参数的 grad 字段中累积。下一步训练前必须 zero_grad，否则多个 batch 的梯度会相加。标签通常不需要梯度，整数 Tensor 也不能用于普通参数梯度。
+
+detach 会切断一个 Tensor 与当前图的连接，适合把预测送到日志或后处理；它不是复制，仍可能共享存储。验证和推理应使用 no_grad 或 inference_mode，减少图和内存；训练中不要为了节省显存把真正需要学习的分支 detach。
+
+### 示例三：看见梯度如何产生
+
+```python
+x = torch.tensor([[2.0, 3.0]], requires_grad=True)
+weight = torch.tensor([[0.5], [2.0]], requires_grad=True)
+bias = torch.tensor([1.0], requires_grad=True)
+
+y = x @ weight + bias
+loss = y.square().mean()
+loss.backward()
+
+print({
+    "y": y.detach().tolist(),
+    "loss": float(loss.detach()),
+    "weight_grad": weight.grad.tolist(),
+    "x_grad": x.grad.tolist(),
+})
+```
+
+运行结果会同时有前向值和梯度；梯度形状必须与原 Tensor 相同。把 backward 放进循环两次而不清零，会看到 grad 变成两次累积，这在训练中会改变学习率的实际效果。若 grad 是 None，先确认 Tensor 是叶子、requires_grad 已打开且计算没有经过 detach。
+
+## 运行、输出与验证
+
+每个模型边界至少验证四件事：输入 shape、输入/标签 dtype、device 一致、输出有限。可以写：
+
+```python
+def inspect_batch(model, features, labels):
+    parameters = list(model.parameters())
+    model_device = parameters[0].device
+    if features.device != model_device or labels.device != model_device:
+        raise ValueError("features, labels, and model must share device")
+    if features.ndim != 2 or labels.ndim != 1:
+        raise ValueError("expected features (batch, features) and labels (batch)")
+    if features.shape[0] != labels.shape[0]:
+        raise ValueError("batch size mismatch")
+    if features.dtype not in (torch.float32, torch.float64):
+        raise TypeError("features must be floating point")
+    if labels.dtype != torch.long:
+        raise TypeError("classification labels must be torch.long")
+    logits = model(features)
+    if not torch.isfinite(logits).all():
+        raise ValueError("model produced NaN or Inf")
+    print(tuple(features.shape), tuple(logits.shape), str(logits.device))
+    return logits
+```
+
+验证输出是可观察的，例如输出 (8, 3)、(8, 2)、cuda:0。若 CPU 运行也应通过，只是资源和耗时不同。不要用一次 GPU 成功就宣称服务可部署；还要测量显存、batch 上限、拷贝耗时和异常输入的失败路径。
+
+## 常见错误、排错与调试
+
+- Expected all tensors to be on the same device：打印 model 参数、features、labels 的 device，统一在 batch 边界 to(device)。
+- Expected floating point type：检查输入是否由整数列表推断而来，明确 dtype=torch.float32。
+- CrossEntropyLoss 报 target 类型或维度错误：logits 应为 batch、classes，target 应为 batch 的 long 类别索引。
+- 梯度为 None 或数值不变：查 requires_grad、detach、no_grad、是否调用了 backward，以及参数是否交给 optimizer。
+- loss 变成 NaN：打印第一次非有限的中间 Tensor，检查学习率、输入范围、混合精度和除零。
+- 显存持续增长：确认每步没有保存带图 Tensor 到 list，日志使用 detach，验证使用 inference_mode。
+- 结果不可复现：固定随机种子、数据排序和 CUDA 确定性设置，并记录 torch 版本、device 和 dtype。
+
+## 练习与任务
+
+写一个 batch 检查器和一个两类线性模型：接收 NumPy 的 float32 特征，转换到可用 device；保证 labels 是 long，logits shape 为 batch、2；计算 CrossEntropyLoss 并完成一次 backward。输出 shape、dtype、device、loss 和每个参数的梯度范数。
+
+<Exercise
+  title="Tensor 契约练习"
+  prompt="实现 prepare_batch(array, labels, device) 和 run_one_step(model, array, labels, device)，拒绝错误 shape、NaN、device 不一致和非 long 标签，返回可观察的结果字典。"
+  hint="使用 torch.as_tensor 或 tensor 明确 dtype；model.to(device)；loss.backward 前先 zero_grad；日志数值用 detach。"
+  solution={`features = torch.as_tensor(array, dtype=torch.float32, device=device)
+targets = torch.as_tensor(labels, dtype=torch.long, device=device)
+if features.ndim != 2 or targets.ndim != 1:
+    raise ValueError("invalid batch shape")
+logits = model(features)
+loss = torch.nn.functional.cross_entropy(logits, targets)
+loss.backward()
+return logits.detach(), loss.detach()`}
+/>
+
+### 完整答案
+
+```python
+def run_one_step(model, array, labels, device):
+    features = torch.as_tensor(array, dtype=torch.float32, device=device)
+    targets = torch.as_tensor(labels, dtype=torch.long, device=device)
+    if features.ndim != 2 or targets.ndim != 1:
+        raise ValueError("expected features (batch, features) and labels (batch)")
+    if features.shape[0] != targets.shape[0]:
+        raise ValueError("feature and label batch sizes differ")
+    if not torch.isfinite(features).all():
+        raise ValueError("features contain NaN or Inf")
+
+    model = model.to(device)
+    model.train()
+    model.zero_grad(set_to_none=True)
+    logits = model(features)
+    if logits.ndim != 2 or logits.shape[0] != features.shape[0]:
+        raise ValueError("model output must be (batch, classes)")
+    loss = torch.nn.functional.cross_entropy(logits, targets)
+    loss.backward()
+    grad_norm = torch.sqrt(sum(
+        (parameter.grad.detach().square().sum()
+         for parameter in model.parameters()
+         if parameter.grad is not None)
+    ))
+    return {
+        "shape": tuple(logits.shape),
+        "dtype": str(logits.dtype),
+        "device": str(logits.device),
+        "loss": float(loss.detach()),
+        "grad_norm": float(grad_norm),
+    }
+```
+
+用 CPU 和可用的 CUDA 各运行一次，结果中的 shape 和 dtype 应一致，device 只在允许范围内变化。再用错误列数、NaN、float 标签和不同设备构造最小复现，确认异常在输入边界而不是深层算子中才出现。
+
+<SolutionReveal>
+  <p>Tensor 调试的第一步永远是打印 shape、dtype、device 和梯度状态。把这些信息放进训练日志，后面的 Module、DataLoader 和推理服务就有一致的诊断语言。</p>
+</SolutionReveal>
+
+## 与同一 AI 项目主线的连接
+
+NumPy 产生的 float32 特征进入 Tensor 后，Dataset/DataLoader 会负责 batch，Module 会负责 logits，评估课程会负责把 logits 变成 precision、recall 和 F1。训练和推理都要复用特征顺序、标准化参数和 data_version；只有训练路径开启 autograd，评估与推理关闭图追踪。device 选择还会影响 batch 上限、延迟和部署资源预算，不能藏在一个全局变量里不记录。
+
+## 小结
+
+PyTorch Tensor 不是带更多 API 的数组，而是数据、shape、dtype、device 和梯度图的组合。进入模型前做契约检查，训练时区分叶子参数、梯度累积和 detach，跨 NumPy 时理解共享内存，运行时记录设备与输出。掌握这些边界后，训练循环的错误会从“某个 CUDA 报错”变成可定位的 shape、dtype、device 或图语义问题。

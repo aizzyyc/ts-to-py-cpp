@@ -1,0 +1,155 @@
+---
+id: cpp-sync
+slug: mutexes-atomics-and-thread-safety
+title: "Mutex、Atomic 与线程安全"
+summary: "区分互斥、原子和无锁的适用边界，避免用 sleep 掩盖竞态问题。"
+track: cpp
+order: 19
+durationMinutes: 18
+concepts: [mutex, atomic, thread safety]
+prerequisites: [cpp-concurrency]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## Mutex、Atomic 与线程安全
+
+JS/TS 的单线程直觉容易让共享变量看起来无害；C++ 多线程中，两个回调可能同时读写同一对象，未同步的冲突就是数据竞争，结果属于未定义行为。`std::atomic` 能保证一个对象的特定读写不可被撕裂，但不会让 `running`、`error` 和 `last_value` 三个字段自动保持同一时刻的一致快照。先定义不变量，再选原语。
+
+### 学习目标
+
+完成本节后，你能为停止标志、计数器和复合传感器状态选择同步工具；解释锁的所有权和作用域；理解 acquire/release 的发布关系；识别死锁、忙等、优先级反转与 ABA 风险；用 TSan、超时和锁等待指标验证修复。
+
+### atomic 适合独立状态
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`let stopped = false;
+function stop() { stopped = true; }
+function loop() { while (!stopped) tick(); }`}
+  targetLabel="C++"
+  targetLanguage="cpp"
+  target={`std::atomic<bool> stopped{false};
+void stop() { stopped.store(true, std::memory_order_release); }
+void loop() { while (!stopped.load(std::memory_order_acquire)) tick(); }`}
+/>
+
+停止标志是典型独立状态；release/acquire 还可以建立停止前写入与观察线程之间的同步关系。不要因为一个整数可以原子递增，就用多个 atomic 拼出复杂快照：读到一半时另一个线程仍可能更新字段。对计数器、标志和无锁的单一 latest-value 可以考虑 atomic，对复合状态优先消息传递或 mutex。
+
+```cpp
+#include <atomic>
+#include <thread>
+
+std::atomic<bool> stopped{false};
+void loop() {
+  while (!stopped.load(std::memory_order_acquire)) process_one();
+}
+int main() {
+  std::thread worker{loop};
+  stopped.store(true, std::memory_order_release);
+  worker.join();
+}
+```
+
+用 `g++ -std=c++20 -pthread stop.cpp -o stop` 编译并验证线程最终 join。这个例子仍可能忙等；如果 `process_one` 会阻塞，应改用条件变量或可取消队列。atomic 只解决 stopped 这个对象的并发访问，不会保护 process_one 读取的其他共享字段。
+
+### mutex 保护一组字段
+
+```cpp
+#include <mutex>
+#include <string>
+
+struct Status { bool running{}; std::string error; double last_value{}; };
+
+class SharedStatus {
+public:
+  void update(double value, std::string error) {
+    std::scoped_lock lock{mutex_};
+    status_.last_value = value;
+    status_.error = std::move(error);
+    status_.running = true;
+  }
+  Status snapshot() const {
+    std::scoped_lock lock{mutex_};
+    return status_;
+  }
+private:
+  mutable std::mutex mutex_;
+  Status status_;
+};
+```
+
+锁覆盖了完整更新和完整快照，调用者拿到的是值副本，锁外可以安全格式化。锁内不要执行网络、日志或未知回调，否则持锁时间会被外部系统拖长。多个 mutex 必须统一加锁顺序，或用 `std::scoped_lock` 一次获取多个锁，避免死锁。
+
+```cpp
+struct Reading { float range_m{}; std::uint64_t stamp_ns{}; };
+
+class ReadingStore {
+ public:
+  void set(Reading next) {
+    std::lock_guard lock{mutex_};
+    value_ = next;
+  }
+  Reading get() const {
+    std::lock_guard lock{mutex_};
+    return value_;
+  }
+ private:
+  mutable std::mutex mutex_;
+  Reading value_;
+};
+```
+
+把 mutex 放在 store 内部、把 `Reading` 设计成可复制快照，可以避免把不可复制的锁暴露给业务。验证时让一个线程交替写 range 和 timestamp，另一个线程读取，检查不会出现新 range 配旧 timestamp。锁保护的是整个不变量，而不是其中某一行。
+
+### 两把锁与死锁顺序
+
+```cpp
+std::mutex sensor_mutex;
+std::mutex config_mutex;
+void update_both() {
+  std::scoped_lock lock{sensor_mutex, config_mutex};
+  apply_config_to_sensor();
+}
+```
+
+如果另一路手动以相反顺序获取两把锁，系统可能互相等待。优先减少同时持有的锁；确需多锁时统一顺序或使用 `scoped_lock`。机器人参数更新、驱动重连和 shutdown 常走不同路径，必须测试这些交叉时序。
+
+### 内存序和 volatile 的误区
+
+默认的 `seq_cst` 最容易理解；只有性能测量和清晰的发布/订阅关系证明需要时，才细化 relaxed/release/acquire。`volatile` 用于内存映射 I/O 等特殊场景，不是线程同步。原子变量也不保护它指向的堆对象，atomic 指针只保证指针读写，所指对象的寿命仍需所有权协议。
+
+### JS/TS 迁移中的同步反例
+
+不要用 `sleep_for(1ms)` 等待另一个线程“写完”，它没有建立 happens-before；不要把 `volatile` 当成 TS 的类型标注；也不要用三个 atomic 拼出一个要求同时一致的消息。更合适的方式是 mutex 快照、不可变消息或有明确发布序号的双缓冲。同步选择要和生命周期、错误边界一起设计。
+
+### 编译、链接、运行时排错
+
+`std::mutex` 未定义引用通常是 target 没有链接正确的线程库或工具链配置不完整；`data race` 需要 TSan 和最小并发复现。偶发卡死先画锁图，检查是否在锁内等待另一个线程；高 CPU 循环则看是否用 atomic 忙等替代了阻塞等待。把 `sleep` 加进循环只能改变复现概率，不能修复竞态。
+
+### 传感器状态的可观测验证
+
+记录 `lock_wait_ns`、snapshot age、线程 ID 和消息序号；测试停止信号能在有界时间内让 worker 退出；用 TSan 跑更新/读取压力测试。若控制线程必须低延迟，先测 mutex 临界区和日志调用，再考虑无锁结构；无锁并不自动更快，也会增加内存回收和 ABA 复杂度。
+
+<KeyIdea title="同步保护的是不变量，不是每一行代码">
+  <p>单变量状态可以用 atomic，必须一起变化的字段用 mutex 或不可变快照。选择原语前先说明读写关系、内存序、锁范围和对象生命周期。</p>
+</KeyIdea>
+
+## 迁移练习
+
+判断一个状态包含 `running`、`error`、`last_value` 时能否只用 atomic；如果不能，写一个带 `snapshot()` 的 mutex 版本。另写一个独立 `dropped_count` atomic，给出生产者递增、诊断线程读取的内存序理由，并用 TSan 计划验证。
+
+<Exercise
+  title="给状态快照选择同步原语"
+  prompt="为停止标志、丢弃计数和复合诊断状态分别选择 atomic、mutex 或消息传递，并标出锁的范围和停止顺序。"
+  hint="三个诊断字段要同时代表一个时刻；独立计数无需和它们组成同一事务。"
+  solution={`stopped 可用 atomic<bool>，dropped_count 可用 atomic<unsigned>，但 running/error/last_value 应由 mutex 保护并通过值快照读取。停止时先发布停止标志，再唤醒等待者；不要让诊断读取在锁内调用日志系统。`}
+/>
+
+<SolutionReveal>
+  <p>mutex、atomic 和消息传递不是等级关系，而是不同状态契约的实现。掌握不变量和内存可见性后，下一节可以为生产者和消费者设计有界队列。</p>
+</SolutionReveal>

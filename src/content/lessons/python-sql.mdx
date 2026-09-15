@@ -1,0 +1,198 @@
+---
+id: python-sql
+slug: sql-and-data-access
+title: "SQL 与数据访问"
+summary: "用 Python 读取结构化数据，理解查询边界、参数化和连接资源管理。"
+track: python
+order: 14
+durationMinutes: 16
+concepts: [sql, database, parameterization]
+prerequisites: [python-async]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标：把 SQL 结果当成数据契约
+
+本节结束时，你能从 JavaScript/TypeScript 的 database client 或 ORM 迁移到 Python `sqlite3`，并解释连接、游标、参数化查询、事务和 row 映射的行为。你会在内存数据库中运行一个小例子：安全地筛选高置信度预测，稳定排序，把数据库行转换成领域对象，并把空结果、NULL、锁冲突和 SQL 错误区分开。
+
+数据库不是一个可以随手读取的字典。SQL 负责声明要取哪些列、怎样过滤和排序；驱动负责绑定参数、发送语句和返回行；Python 边界负责校验类型、单位、时间窗口和业务必填字段。AI 训练样本或在线特征只有经过这三层，才适合交给模型。
+
+## 从 JS/TS 迁移的心智模型：查询、参数和事务是三种责任
+
+JS/TS 的 `db.query(sql, values)` 与 Python 的 `connection.execute(sql, parameters)` 都支持把值和 SQL 结构分开。参数只能代表值，不能代表表名、列名或排序方向；动态标识符必须用白名单映射。Python `sqlite3` 默认返回 tuple，访问 `row[0]` 很快但容易把列顺序写死；设置 `row_factory = sqlite3.Row` 后可以按列名读取，但仍要在业务边界校验 NULL 和类型。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const rows = await db.query(
+  "SELECT id, score FROM predictions WHERE score > ?",
+  [threshold],
+);`}
+  targetLabel="Python"
+  targetLanguage="python"
+  target={`with sqlite3.connect(path) as connection:
+    connection.row_factory = sqlite3.Row
+    rows = connection.execute(
+        "SELECT id, score FROM predictions WHERE score > ?",
+        (threshold,),
+    ).fetchall()`}
+/>
+
+### 1. sqlite3 连接、游标和上下文管理器
+
+`sqlite3.connect(path)` 打开一个连接；`connection.execute()` 会创建或复用游标并返回可迭代结果；`fetchone()`、`fetchall()` 和直接迭代决定何时把行拉进内存。`with connection:` 管理的是事务：代码成功时提交，异常时回滚；它不会自动关闭连接。短脚本可以在 finally 中 close，长生命周期服务要用明确的依赖或连接池策略。
+
+```python
+import sqlite3
+
+def open_demo() -> sqlite3.Connection:
+    connection = sqlite3.connect(":memory:", timeout=3)
+    connection.row_factory = sqlite3.Row
+    connection.execute("CREATE TABLE predictions (id TEXT, score REAL, label TEXT)")
+    connection.executemany(
+        "INSERT INTO predictions VALUES (?, ?, ?)",
+        [("a", 0.92, "yes"), ("b", 0.41, "no"), ("c", 0.88, None)],
+    )
+    connection.commit()
+    return connection
+
+connection = open_demo()
+try:
+    rows = connection.execute(
+        "SELECT id, score, label FROM predictions ORDER BY id"
+    ).fetchall()
+finally:
+    connection.close()
+```
+
+连接的 `timeout` 只控制等待 SQLite 锁的时间，不是查询中所有 Python 处理的总预算。对于长查询、文件 I/O 或上游模型调用，要在应用层另行设置时间边界。不要把一个连接跨多个不相关线程随意共享；SQLite 的线程模式、事务和锁策略要与部署方式一致。
+
+### 2. 参数化查询：值可以绑定，SQL 结构不能拼
+
+使用 `?` 占位符并把参数作为 tuple 传给 `execute`，驱动会负责转义字符串和绑定类型。单个参数必须写成 `(threshold,)`，少了逗号就只是一个数值。绝不能把用户输入或模型生成的筛选条件拼进 f-string；如果要让用户选择排序列，用 `{"created_at": "created_at", "score": "score"}` 这样的白名单把外部名字映射成固定 SQL 片段。
+
+```python
+def recent_predictions(connection, threshold: float, since: str):
+    query = """
+        SELECT id, score, label, created_at
+        FROM predictions
+        WHERE score >= ? AND created_at >= ?
+        ORDER BY created_at ASC, id ASC
+    """
+    return connection.execute(query, (threshold, since)).fetchall()
+
+def list_by_column(connection, column: str):
+    allowed = {"created_at": "created_at", "score": "score"}
+    chosen = allowed.get(column)
+    if chosen is None:
+        raise ValueError("unsupported sort column")
+    return connection.execute(
+        f"SELECT id, score FROM predictions ORDER BY {chosen}"
+    ).fetchall()
+```
+
+参数化解决的是 SQL 结构注入和类型绑定，不会替你验证 threshold 的业务范围、时间字符串的时区或查询是否返回重复实体。时间窗口要明确是 UTC、秒还是毫秒，边界是 `>=` 还是 `>`，排序要有稳定 tie-breaker；否则相同任务重跑可能拿到不同样本。
+
+### 3. 事务：把相关写入作为一个原子单元
+
+事务回答的是“哪些写入必须一起成功”。批量写入样本和对应统计时，可以用 `with connection:` 包住两者；中途抛出异常会回滚已经执行的 SQL。不要每行都 `commit()`，那会增加 fsync 和锁竞争，也会让半批数据变得难以恢复。读查询通常不需要手动开启事务，但长读事务会影响写入和锁等待，仍要控制生命周期。
+
+```python
+def store_predictions(connection, rows: list[tuple[str, float, str]]) -> int:
+    try:
+        with connection:
+            connection.executemany(
+                "INSERT INTO predictions (id, score, label) VALUES (?, ?, ?)",
+                rows,
+            )
+            connection.execute(
+                "INSERT INTO load_stats (row_count) VALUES (?)",
+                (len(rows),),
+            )
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("prediction batch was rejected") from exc
+    return len(rows)
+```
+
+这里假设 `load_stats` 与 `predictions` 属于同一提交边界；如果统计不是必需的，也可以把它改成独立事件。异常链保留 SQLite 的约束错误，业务层只接收稳定的语义。多进程同时写 SQLite 时要预期锁冲突，设置合理 `timeout`、短事务并考虑 WAL；不要用无限重试掩盖数据库设计问题。
+
+### 4. 从 row 到领域对象：列名、NULL 和类型
+
+查询结果进入模型前应转换成明确的对象，而不是让所有调用点记住 `row[1]` 是 score。`sqlite3.Row` 支持 `row["score"]`，但数据库中的 REAL 仍可能是 NULL，TEXT 也可能来自旧数据。映射函数应逐行验证必填列、分数范围、标签类型和时间单位；坏行可以隔离并计数，关键契约失败则让任务失败。
+
+```python
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class Sample:
+    sample_id: str
+    score: float
+    label: str
+    source: str
+
+def to_sample(row: sqlite3.Row) -> Sample:
+    if row["id"] is None or row["label"] is None or row["score"] is None:
+        raise ValueError("prediction row has a required NULL")
+    score = float(row["score"])
+    if not 0 <= score <= 1:
+        raise ValueError("score must be between 0 and 1")
+    return Sample(str(row["id"]), score, str(row["label"]), "sqlite")
+```
+
+不要使用 `SELECT *` 作为稳定契约；表新增列不应改变下游含义。把 SQL 版本、输入时间窗口、查询参数摘要和输出计数写入 job 日志或 sidecar，训练和评估任务才能回答“这些样本从哪里来”。
+
+## 运行验证：用固定数据观察输入、输出和事务结果
+
+在 `:memory:` 数据库中插入 `a=0.92`、`b=0.41`、`c=NULL` 三行，运行 threshold=0.8 的参数化查询，预期输出先得到 a 和 c，再由 `to_sample` 接受 a、隔离 c；查询空窗口时输出是空列表，不能把它误报成连接失败。另建一个唯一键冲突的批次，预期事务回滚，预测表和统计表都不增加半条数据。
+
+测试至少覆盖：恶意字符串作为 threshold 或 label 时 SQL 结构没有改变；单元素参数使用逗号；稳定排序在相同 created_at 时按 id 决定；NULL、越界 score、低分和合法 row 分别走对应分支。运行命令可以是 `python -m pytest tests/test_sql.py -q`，输出应包含通过数量，并用查询后的计数证明 rollback 真的发生。
+
+## 常见错误、排错与调试路径
+
+最常见错误是把 `(threshold)` 写成没有逗号的单值、用字符串拼接 SQL、忘记 close 连接、误以为 `with connection` 会 close、把空结果和异常都转换成 `[]`，以及把 NULL 强制 `float` 后得到误导性错误。看到 `database is locked`，先检查是否有未提交事务、长时间游标或并发写入，再调整 timeout；不要先加无限重试。
+
+查询数量突然增加时，检查 join 的一对多关系是否把一行乘成多行，并用主键计数；分数排序异常时检查列类型和 `CAST`；时间窗口不对时打印 UTC 化后的边界和样本时间，不要只打印 SQL 字符串。调试数据库到模型的链路，要同时记录查询版本、接受/拒绝计数和 row 映射错误字段，避免只看到最终模型指标。
+
+## 练习：读取高置信度样本
+
+任务是实现 `load_training_rows(connection, threshold, since)`：用参数化 SQL 选出最近 24 小时、score 不低于阈值的必要字段，稳定排序，逐行校验并转换成 `Sample`；返回 `samples`、`dropped` 和空结果统计。再写一条测试，传入包含引号的字符串，确认不会改变 SQL 结构。
+
+<KeyIdea title="数据访问的核心是安全、边界与可追溯">
+  <p>参数化保证安全，事务保证一致性，显式字段和版本保证可追溯。AI 模型只应看到经过这些数据库边界处理的记录。</p>
+</KeyIdea>
+
+<Exercise
+  title="SQL 与数据访问练习"
+  prompt="实现 load_training_rows(connection, threshold, since)，用参数化 SQL 选出必要字段，逐行校验 score 和 label，再转换成 Sample；返回 rows 和 dropped 统计。"
+  hint="先选列并稳定排序；不要在 SQL 字符串中插入 threshold 或用户提供的时间；将 NULL 和越界行计入 dropped。"
+  solution={`rows = connection.execute(
+    "SELECT id, score, label FROM predictions "
+    "WHERE score >= ? AND created_at >= ? ORDER BY created_at, id",
+    (threshold, since),
+).fetchall()
+samples = []
+dropped = 0
+for row in rows:
+    try:
+        samples.append(to_sample(row))
+    except (TypeError, ValueError):
+        dropped += 1`}
+/>
+
+<SolutionReveal>
+  <p>在内存 SQLite 中建表并插入合法、NULL、低分和重复关系样本，检查查询结果与 dropped 统计；再用参数值包含引号的输入跑一次，确认代码没有字符串拼接。最后模拟 IntegrityError，证明相关写入会整体回滚。</p>
+</SolutionReveal>
+
+## 与 AI 数据、模型和推理服务连接
+
+SQL 是训练样本、评估集、检索候选和在线特征的重要来源。查询边界应记录时间窗口、标签生成时间、schema 版本和过滤阈值；row 映射应把数据库 NULL、字符串数值和旧单位转换成明确的领域对象。这样模型看到的是可解释的输入，而不是一个随表结构变化的 tuple。
+
+在线推理服务可以从 SQLite 读取本地缓存、用户配置或审核后的特征，但连接与事务不应包住整个模型调用；先短事务读取并转换，释放连接，再调用 AI 服务。批量训练写入要保证样本与统计原子提交，坏行进入可审核隔离表，查询失败则让 job 失败，不能用空列表伪装成“没有样本”。
+
+## 小结
+
+Python `sqlite3` 的关键不是记住一个 SELECT，而是管理连接生命周期、参数绑定、事务边界和 row 到对象的校验。运行验证要同时观察输入参数、输出样本、空结果、错误类型和 rollback 计数；这些证据让 SQL 成为可靠的 AI 数据入口，而不是模型异常的黑箱前一步。

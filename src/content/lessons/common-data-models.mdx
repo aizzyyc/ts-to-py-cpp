@@ -1,0 +1,87 @@
+---
+id: common-data-models
+slug: data-models-and-boundaries
+title: "数据模型与边界：对象不只是 JSON"
+summary: "理解对象、struct、class 和消息结构在跨语言项目中的职责边界。"
+track: common
+order: 5
+durationMinutes: 14
+concepts: [data model, struct, class, schema]
+prerequisites: [common-concurrency]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 先把“数据长什么样”说清楚
+
+在 JS/TS 项目里，一个对象既可能是接口返回值，也可能是内部状态或临时参数。动态对象让原型开发很快，但跨进程、跨语言或进入模型推理时，数据需要明确的形状、单位和生命周期。迁移到 Python 或 C++，第一步不是把 `object` 翻译成某个关键字，而是判断它是外部输入、可信内部值、不可变快照，还是带行为的不变量对象。
+
+例如传感器消息的 `timestamp` 必须说明是秒还是毫秒、墙上时钟还是单调时钟；`value` 要说明是否允许 NaN；`unit` 是固定集合还是任意字符串。字段名只是表面，真正的模型是“字段 + 约束 + 所有权 + 失败语义”。AI 特征和机器人消息一旦离开进程，就应当把这些信息放到可审查的契约里。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`type SensorReading = {\n  name: string;\n  value: number;\n  timestamp: number;\n};`}
+  targetLabel="Python"
+  targetLanguage="python"
+  target={`from dataclasses import dataclass\n\n@dataclass(frozen=True)\nclass SensorReading:\n    name: str\n    value: float\n    timestamp: int`}
+/> 
+
+### 用模型表达不变量
+
+Python `dataclass(frozen=True)` 可以表达一个不可变快照，但不会自动保证范围；C++ `struct` 让字段类型清楚，却仍需构造函数或解析函数校验单位；TypeScript 类型只在开发工具和编译阶段帮助你，运行时 JSON 仍可能缺字段。推荐让 `from_json`、`parse` 或构造工厂成为唯一入口，核心函数只接收已经通过检查的模型。
+
+```python
+from dataclasses import dataclass
+import math
+
+@dataclass(frozen=True)
+class SensorReading:
+    name: str
+    value: float
+    unit: str
+    timestamp_ms: int
+
+def parse_reading(raw: dict) -> SensorReading:
+    required = ("name", "value", "unit", "timestamp_ms")
+    if any(field not in raw for field in required):
+        raise ValueError("reading field is missing")
+    value = raw["value"]
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError("value must be a finite number")
+    return SensorReading(str(raw["name"]), float(value), str(raw["unit"]), int(raw["timestamp_ms"]))
+```
+
+### 外部数据与内部数据分层
+
+原始 JSON 可以使用字典或第三方库对象，但不要让它穿过所有模块。解析层负责字段存在、基本类型、时间单位和大小限制；领域层负责“温度不能低于绝对零度”这类业务规则；输出层再把内部模型转换回协议。这样的分层特别适合 AI：训练数据格式可变，模型输入张量却需要固定 shape 和 dtype。
+
+### 常见错误与排错思路
+
+常见错误是把字段缺失当成 `0`，让坏消息看起来像真实读数；另一个错误是把可变字典交给多个消费者，某个消费者修改后影响其他逻辑。排错时记录 schema/version、字段名和单位，不要只打印整个 payload；对 NaN、时间倒退、重复 id 写单独测试。C++ 若出现未定义行为，优先检查对象是否初始化、字符串/缓冲区是否仍然有效以及解析结果是否被忽略。
+
+<KeyIdea title="数据结构是团队之间的契约">
+  <p>AI 输入、机器人消息和 HTTP 响应都不是“随便一个对象”。先定义字段、单位、缺失值和时间含义，再选择语言里的表达方式。</p>
+</KeyIdea>
+
+## 从 JSON 到内部模型
+
+外部 JSON 可以保持宽松，但进入核心逻辑前要完成一次转换。解析层检查字段存在、基本类型、时间单位和大小限制；领域层检查“温度不能低于绝对零度”这类业务规则；输出层再把内部模型转换回协议。这样的分层特别适合 AI：训练数据格式可变，模型输入张量却需要固定 shape 和 dtype。不要把原始字典或 `any` 直接传遍整个项目。
+
+### 迁移练习的验收点
+
+练习先画出 raw JSON、内部模型和输出消息三个节点，标出每次转换发生的位置。一个合格的实现应能说明缺失字段、非法单位、NaN 和旧版本消息分别在哪里被拒绝或转换。
+
+<Exercise
+  title="为传感器消息划分边界"
+  prompt="写出包含 name、value、unit、timestamp 的内部数据模型，标出输入边界和领域边界各自负责的校验，并给出一条缺失字段和一条单位不支持时的错误结果。"
+  hint="先区分字段类型和业务约束，例如 value 是否允许 NaN，timestamp 使用毫秒还是秒。"
+  solution={`用不可变 Reading 保存已转换的数据；解析层校验 name、字段类型、unit 集合和 timestamp_ms 是否存在，领域层校验 value 是否有限且在传感器允许范围内。错误应带字段名和原因，不能静默填零。`}
+/> 
+
+<SolutionReveal>
+  <p>最重要的不是类名，而是边界：原始输入只在解析层出现，核心逻辑只接收已经满足约束的模型。这个习惯会让 Python 数据处理和 C++ 消息消费都更稳定，也让 schema 演进有明确落点。</p>
+</SolutionReveal>

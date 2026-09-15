@@ -1,0 +1,254 @@
+---
+id: python-mlops
+slug: experiment-configs-and-model-monitoring
+title: "实验配置与模型监控"
+summary: "用配置、数据版本和输入分布监控把一次实验变成可维护的工程流程。"
+track: python
+order: 29
+durationMinutes: 18
+concepts: [mlops, configuration, monitoring]
+prerequisites: [python-deployment]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+本节把一次本地训练连接到可维护的 MLOps 流程。完成后你能够：
+
+- 设计可校验、可序列化、可被 CLI 或环境变量覆盖的运行配置。
+- 将代码、数据、特征、模型和实验结果用版本或哈希关联起来。
+- 监控服务质量、输入分布、预测分布和有标签后的模型指标。
+- 从漂移告警推导回滚、暂停、再训练或人工复核动作，而不是只发一条红色消息。
+
+## 从 JS/TS 迁移的心智模型
+
+Web 应用可能用环境变量和 npm script 组合出一次启动命令；AI 实验若依赖终端历史，就很难回答某个 checkpoint 使用了什么数据、seed、学习率和特征。JavaScript/TypeScript 的 config object 需要升级为可验证的运行协议：配置解析后冻结，实验保存 resolved config，线上服务再把 model_version、data_version 和指标关联起来。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const config = { model: process.env.MODEL, threshold: 0.8 };
+const result = await predict(input);
+metrics.count("prediction");`}
+  targetLabel="Python / MLOps"
+  targetLanguage="python"
+  target={`config = load_config()
+predictor = load_model(config.model_path)
+monitor.observe_input(features)
+monitor.observe_output(result, threshold=config.threshold)`}
+/>
+
+<KeyIdea title="MLOps 的最小单位是一次可解释运行">
+  <p>每次运行都应指向代码、数据、配置、模型和指标。监控的价值是把观察连接到可执行的工程动作。</p>
+</KeyIdea>
+
+## 配置：解析、校验与覆盖顺序
+
+建议先定义默认值，再读取配置文件，再应用环境变量和 CLI 覆盖，并把优先级写进文档。最终只保存解析后的非敏感配置；API key、密码和完整请求体不能进入 artifact。字段应有范围：batch_size 为正整数，learning_rate 为正数，threshold 在 0 到 1，timeout_ms 不得为零。未知字段和拼写错误要报错，不能静默回退默认值。
+
+配置还要包含特征顺序、data_version、split_id、模型结构、device、worker 数和资源预算。配置对象冻结后传给训练、评估和部署，避免某个函数偷偷改全局字典。线上可覆盖的字段应经过 allowlist，不能让任意环境变量改变模型路径或安全策略。
+
+### 示例一：用 dataclass 保存 resolved config
+
+```python
+from dataclasses import asdict, dataclass
+import json
+from pathlib import Path
+
+@dataclass(frozen=True)
+class RunConfig:
+    seed: int = 42
+    batch_size: int = 32
+    learning_rate: float = 1e-3
+    threshold: float = 0.65
+    timeout_ms: int = 500
+    data_version: str = "events-v3"
+    feature_names: tuple[str, ...] = ("energy", "duration", "noise")
+
+    def validate(self):
+        if self.batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        if self.learning_rate <= 0:
+            raise ValueError("learning_rate must be positive")
+        if not 0 <= self.threshold <= 1:
+            raise ValueError("threshold must be between 0 and 1")
+        if self.timeout_ms < 1 or not self.feature_names:
+            raise ValueError("timeout and features are required")
+
+config = RunConfig(batch_size=64)
+config.validate()
+Path("artifacts/resolved-config.json").write_text(
+    json.dumps(asdict(config), indent=2), encoding="utf-8"
+)
+print(asdict(config))
+```
+
+运行输出是完整的 resolved config，能被下一次运行直接读取。tuple 在 JSON 中会转成数组，但加载时要恢复类型或统一使用 list；关键不是数据结构偏好，而是 config.json 与日志中的实际参数一致。验证错误应在训练启动前发生，避免跑了半小时才发现 threshold=3。
+
+## 版本关联：代码、数据和模型
+
+model_version 只说明权重是哪一版，不能替代 data_version。数据版本应由原始文件哈希、查询窗口、过滤规则或数据注册表 ID 表示；代码版本可以是提交 ID 或构建版本；feature_schema_version 描述列名、顺序、单位和缺失策略。实验 manifest 把这些值、resolved config、split_id、seed、device 和依赖版本放在同一处。
+
+生成 artifact 时不要把完整数据复制进去。保存输入哈希、行数、标签比例、每列统计、切分摘要和敏感数据的脱敏摘要。权重和预处理参数要能与模型结构一起加载；如果 schema 变了，应增加版本并明确兼容转换，而不是让服务猜测。
+
+### 示例二：生成实验 manifest
+
+```python
+from datetime import datetime, timezone
+import hashlib
+import json
+import platform
+
+def digest_payload(payload):
+    encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+manifest = {
+    "run_id": "run-20260913-001",
+    "created_at": datetime.now(timezone.utc).isoformat(),
+    "code_version": "app-2026-09-13",
+    "data_version": config.data_version,
+    "split_id": "split-42-device",
+    "feature_schema_version": "features-v2",
+    "seed": config.seed,
+    "python": platform.python_version(),
+    "config_digest": digest_payload(asdict(config)),
+}
+manifest["run_digest"] = digest_payload(manifest)
+print(manifest)
+```
+
+run_digest 让配置或关联字段变化变得可见；created_at 适合审计，但不能成为唯一的模型身份。生产系统应从构建环境提供 code_version，从数据准备阶段传入 data_version，而不是在脚本里写一个看似稳定的字符串。manifest 生成后写入训练、评估、checkpoint 和部署包。
+
+## 监控什么：服务、输入、输出和质量
+
+服务层指标包括请求数、错误率、p50/p95/p99 latency、队列长度、超时、CPU/GPU、内存和显存。输入层指标包括缺失率、shape、dtype、范围、长度、类别比例、设备/站点比例和时间窗口。输出层指标包括预测类别比例、置信度分布、拒绝率和 model_version。标签到达后再计算 precision、recall、F1、校准误差和分组指标。
+
+没有标签时，预测分布漂移只是代理信号，不能当作准确率。监控应聚合或采样，避免记录完整音频、文本和高基数 request_id；指标标签有上限，request_id 应进入 trace/log 而不是 metric label。监控代码失败不能拖垮预测请求，写入失败应降级并记录计数。
+
+### 示例三：用基线窗口检测输入漂移
+
+```python
+import numpy as np
+
+def histogram_drift(reference, current, bins):
+    reference = np.asarray(reference, dtype=np.float64)
+    current = np.asarray(current, dtype=np.float64)
+    if not np.isfinite(reference).all() or not np.isfinite(current).all():
+        raise ValueError("monitoring values must be finite")
+    ref_hist, _ = np.histogram(reference, bins=bins)
+    cur_hist, _ = np.histogram(current, bins=bins)
+    ref_rate = (ref_hist + 1) / (ref_hist.sum() + len(ref_hist))
+    cur_rate = (cur_hist + 1) / (cur_hist.sum() + len(cur_hist))
+    psi = float(np.sum((cur_rate - ref_rate) * np.log(cur_rate / ref_rate)))
+    return {"psi": psi, "reference_rows": len(reference), "current_rows": len(current)}
+
+report = histogram_drift(
+    baseline_scores,
+    today_scores,
+    bins=np.linspace(0, 1, 11),
+)
+print(report)
+```
+
+输出包含 PSI 或类似漂移分数、两个窗口的样本数。阈值不应凭网上的一个数字直接采用：先用历史正常窗口估计波动，再结合业务影响设 warning 和 critical；还要检查采样率、版本和数据源是否改变。漂移检测应记录窗口开始结束、bin 边界和最小样本数，保证结果可复算。
+
+## 告警到行动：不要只堆仪表盘
+
+告警规则必须有 owner、阈值来源、冷却时间和动作。例如 p95 latency 连续超过预算先降低并发或回滚；输入缺失率突增先暂停自动再训练并检查上游；预测正例比例变化先核对阈值和流量结构；有标签后的 recall 下降才考虑模型、数据或标签规则。一次告警可能是数据源变更，不应自动盲目替换模型。
+
+离线实验和线上监控使用相同的 feature_schema_version、model_version 和 data_version，才能把漂移与具体发布关联。保留正常窗口和告警窗口的聚合统计，回滚后比较恢复情况。再训练前重新做 split 和 leakage 审计，不要把线上待预测数据直接加入训练集。
+
+## 运行、输出与验证
+
+一次 MLOps smoke run 应打印 config digest、data version、model version、输入统计、预测统计和资源指标：
+
+```python
+metrics = {
+    "inference_latency_ms_p95": 38.4,
+    "error_rate": 0.002,
+    "input_missing_rate": 0.011,
+    "positive_rate": 0.083,
+    "gpu_memory_mb": 2140,
+}
+print({
+    "config_digest": manifest["config_digest"],
+    "data_version": manifest["data_version"],
+    "metrics": metrics,
+    "actions": [],
+})
+assert 0 <= metrics["error_rate"] <= 1
+assert 0 <= metrics["input_missing_rate"] <= 1
+assert metrics["inference_latency_ms_p95"] < config.timeout_ms
+```
+
+运行验证应包括正常窗口、缺失率突增、预测全为一类、延迟超预算和监控后端不可用。输出的 actions 要能解释告警采取了什么措施；如果只输出一个 drift=true，排错仍然要回到原始窗口、版本和采样逻辑。
+
+## 常见错误、排错与调试
+
+- 配置看似生效但训练参数没变：打印 resolved config 和 digest，逐层检查默认、文件、环境变量、CLI 覆盖顺序。
+- 训练无法复现：比较 data_version、split_id、feature schema、seed、代码/依赖版本、worker 和 device，而不是只比较学习率。
+- 漂移每小时报警：检查窗口样本量、采样偏差、bin 边界和基线更新策略，增加冷却与最小样本数。
+- 模型指标下降却没有告警：标签延迟或监控只记录请求数；补充有标签后的 F1、recall、分组和版本关联。
+- 监控占用大量资源：限制采样、聚合和 metric label cardinality，关闭完整输入记录，测量监控自身耗时。
+- 告警触发错误回滚：检查阈值来源、模型版本、数据源变更和健康指标，动作先进入人工确认或灰度。
+- 产物泄露密钥：检查 manifest、环境变量展开、日志和 artifact，使用字段 allowlist，禁止保存 secret 值。
+- MLOps 代码拖慢服务：监控写入异步化或降级，预测主路径只保留必要计数和有限大小的摘要。
+
+## 练习与任务
+
+为上一节的模型服务设计一份 RunConfig、实验 manifest 和监控清单：配置包含 seed、batch_size、learning_rate、threshold、timeout_ms、data_version、model_version 和 feature schema；监控包含延迟、错误、输入缺失率、预测分布、资源和有标签后的 F1。为每个告警写阈值来源、owner、冷却时间和动作。
+
+<Exercise
+  title="配置与漂移监控练习"
+  prompt="实现 RunConfig.validate、manifest_digest 和 monitor_window；用正常窗口与缺失率突增窗口运行，返回 warning/critical 动作；禁止把 request_id 或原始输入作为高基数指标。"
+  hint="配置先解析再冻结；漂移窗口保存 bins、rows、data_version；把服务质量、输入代理信号和真实质量指标分开。"
+  solution={`config = RunConfig(batch_size=64, data_version="events-v3")
+config.validate()
+manifest = {"config": asdict(config), "data_version": config.data_version}
+drift = histogram_drift(reference, current, bins=np.linspace(0, 1, 11))
+action = "inspect_data_source" if drift["psi"] > 0.2 else "none"
+return {"manifest": manifest, "drift": drift, "action": action}`}
+/>
+
+### 完整答案
+
+```python
+def monitor_window(reference, current, metrics, config, bins):
+    drift = histogram_drift(reference, current, bins)
+    actions = []
+    if metrics["inference_latency_ms_p95"] > config.timeout_ms:
+        actions.append("reduce_traffic_or_rollback")
+    if metrics["input_missing_rate"] > 0.05:
+        actions.append("pause_retraining_and_inspect_source")
+    if drift["psi"] > 0.2:
+        actions.append("compare_data_versions")
+    return {
+        "data_version": config.data_version,
+        "rows": drift["current_rows"],
+        "drift": drift,
+        "metrics": metrics,
+        "actions": actions,
+    }
+
+normal = monitor_window(baseline_scores, today_scores, metrics, config, np.linspace(0, 1, 11))
+print(normal)
+```
+
+阈值 0.2 仅是示例，真实系统要用历史正常数据校准。用 p95 超预算、缺失率 6%、预测分布变化和有标签 F1 下降分别测试，确认动作可以区分服务故障、数据源故障和模型质量故障；把结果连回 run manifest，而不是另建一个无法关联的告警表。
+
+<SolutionReveal>
+  <p>MLOps 不是把训练搬到平台，而是让配置、版本、指标和动作形成闭环。没有 data_version 与 feature schema，漂移无法解释；没有 owner 与回滚策略，告警也无法降低风险。</p>
+</SolutionReveal>
+
+## 与同一 AI 项目主线的连接
+
+deployment 返回 model_version、request_id 和延迟，inference 提供 batch/device 资源数据，evaluation 提供 F1、recall 和 checkpoint，datasets 提供 split_id 与 data_version。本节把它们放进同一 manifest 和监控协议；project CLI 会负责生成更早的数据版本和统计。这样一次线上异常可以沿着服务请求、模型权重、训练配置、切分规则和原始数据逐步回溯。
+
+## 小结
+
+可维护的 AI 运行需要冻结配置、关联代码/数据/模型版本、监控服务与输入输出，并为告警定义动作。seed 只是可复现起点，漂移分数只是代理证据，真实质量要等标签；监控还要尊重资源、隐私和高基数边界。把每次运行保存为可序列化 manifest，MLOps 才能从仪表盘升级为可审核的工程流程。

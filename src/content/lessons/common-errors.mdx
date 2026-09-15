@@ -1,0 +1,80 @@
+---
+id: common-errors
+slug: errors-debugging-and-logging
+title: "错误、调试与日志：让失败可定位"
+summary: "把 try/catch、返回值、断点和结构化日志放进同一套排错流程。"
+track: common
+order: 6
+durationMinutes: 14
+concepts: [errors, debugging, logging, observability]
+prerequisites: [common-data-models]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 错误不是最后才处理的事情
+
+JS/TS 开发者通常熟悉 `throw`、`try/catch` 和 Promise rejection。迁移到 Python 时，异常模型依然存在；进入 C++ 后，还会遇到返回值、`std::optional`、`std::expected` 和状态码等显式错误路径。真正要迁移的是判断：错误发生在哪一层，调用者能否恢复，以及日志应该记录什么上下文。
+
+一个可维护的错误至少回答“哪项操作、哪个对象、什么原因、是否可重试”。输入错误通常应该让调用方修正数据，网络超时可能重试，违反核心不变量则应尽快终止。不要把所有失败都转成 `null` 或空数组，否则模型服务不可用和“查询结果为空”会变成同一种假成功。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`async function loadConfig(path: string) {\n  try {\n    return JSON.parse(await readFile(path));\n  } catch (error) {\n    throw new Error("config unavailable", { cause: error });\n  }\n}`}
+  targetLabel="Python"
+  targetLanguage="python"
+  target={`def load_config(path: str) -> dict:\n    try:\n        return json.loads(Path(path).read_text())\n    except (OSError, json.JSONDecodeError) as error:\n        raise ConfigError(path) from error`}
+/> 
+
+### 一个可重复的排错顺序
+
+先记录输入的身份，不要记录密码、token 或完整用户数据；找到第一个发生错误的边界，而不是只看最外层堆栈；区分可恢复错误和程序错误；最后给错误增加稳定的类型或错误码。Python 可以在 `except` 中用 `raise ... from error` 保留原因，C++ 可以用枚举错误码和 `std::error_code`，JS/TS 则可在 `cause` 中保留原异常。
+
+```typescript
+type Failure = {
+  kind: "timeout" | "invalid-input" | "unavailable";
+  operation: string;
+  retryable: boolean;
+};
+
+function describe(failure: Failure): string {
+  return `${failure.operation}: ${failure.kind}`;
+}
+```
+
+### 日志与异常边界
+
+库函数可以抛出有意义的异常，应用入口负责把异常转换成用户可理解的消息和退出码。不要在每一层都 `catch` 后重新打印，否则同一个失败会出现三四条重复日志。调试器适合回答“这一行的变量是什么”，日志适合回答“这个问题在真实环境发生过多少次”。进入 AI 和机器人项目后，两者都需要：本地调试靠断点，现场定位靠结构化事件。
+
+### 常见错误与排错思路
+
+空的 `catch`、宽泛的 `except Exception` 和忽略 C++ 返回值都会隐藏根因。排错时从关联 id 找到第一条错误，检查错误是否被重新包装成无上下文的文本，再对照重试次数判断根因是否是连锁症状。若日志中出现敏感数据，先修复日志边界并轮换泄露凭据，然后再继续分析业务失败。
+
+<KeyIdea title="日志要回答下一步该做什么">
+  <p>一条好的日志至少包含事件名、资源标识、阶段和结果。不要只打印“出错了”，也不要把堆栈和敏感数据混成一行无法检索的文本。</p>
+</KeyIdea>
+
+## 异常边界与日志边界
+
+库函数可以抛出有意义的异常，应用入口负责把异常转换成用户可理解的消息和退出码。不要在每一层都 `catch` 后重新打印，否则同一个失败会出现三四条重复日志。
+
+调试器适合回答“这一行的变量是什么”，日志适合回答“这个问题在真实环境发生过多少次”。进入 AI 和机器人项目后，两者都需要：本地调试靠断点，现场定位靠结构化事件。
+
+## 迁移练习
+
+请完成：为一个模型文件加载失败设计错误类型、日志字段和入口行为，区分下载超时、文件格式错误与模型内部不变量失败。
+
+<Exercise
+  title="为失败路径补上下文"
+  prompt="假设一个模型文件加载失败，请写出一条不泄露绝对路径和凭据、但足以定位问题的日志字段。"
+  hint="思考 operation、model_id、stage、error_type、duration_ms 和 retryable 这些字段。"
+  solution={`记录 event=model_load_failed、model_id、stage、error_type、duration_ms 和 retryable，不记录完整 URL、token 或绝对路径。下载超时可重试，格式错误提示模型版本，内部不变量保留堆栈并停止当前任务。`}
+/> 
+
+<SolutionReveal>
+  <p>把“错误信息”设计成机器也能读取的事件，后续才能统计失败率、区分网络问题和模型问题，并在不改变业务代码的情况下接入监控。</p>
+</SolutionReveal>

@@ -1,0 +1,55 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import ProgressIndicator from "../../components/ProgressIndicator.astro";
+import RouteSidebar from "../../components/RouteSidebar.astro";
+import { getLessonSection, LESSONS, TRACK_DESCRIPTIONS, TRACK_SECTION_LABELS, type LessonSection, type Track } from "../../lib/lessons";
+
+const tracks: Track[] = ["common", "python", "cpp"];
+const sections: LessonSection[] = ["foundation", "specialization"];
+---
+
+<BaseLayout title="学习路线 · LangShift">
+  <section class="learn-hero">
+    <div class="page-container learn-hero-row">
+        <div><span class="eyebrow">YOUR LEARNING PATH</span><h1>从 JS/TS 出发，走到新的现场。</h1><p>选择一条路径，先完成对应语言的迁移基础，再进入 AI 或机器人专项。每节课都短、具体，并且有一个可以马上动手的小练习。</p></div>
+      <ProgressIndicator total={LESSONS.length} />
+    </div>
+  </section>
+  <section class="learn-content">
+    <div class="page-container">
+      <div class="route-mode" data-route-mode hidden>
+        <div><span class="eyebrow">CURRENT PATH</span><strong data-route-mode-label></strong><span data-route-mode-copy>语言迁移基础 + 专项内容</span></div>
+        <a href="/learn" data-clear-goal>查看全部路线</a>
+      </div>
+      <div class="learn-layout">
+        <RouteSidebar lessons={LESSONS} />
+        <div>
+         {tracks.map((track) => {
+            const trackLessons = LESSONS.filter((lesson) => lesson.track === track).sort((a, b) => a.order - b.order);
+            const groups = sections
+              .map((section) => ({ section, lessons: trackLessons.filter((lesson) => getLessonSection(lesson) === section) }))
+              .filter((group) => group.lessons.length > 0);
+            return <section class="track-section" id={track} data-track={track}>
+              {groups.map(({ section, lessons }) => {
+                const description = section === "foundation" && track !== "common"
+                  ? ["把 JS/TS 经验迁移到 ", track === "python" ? "Python" : "现代 C++", "，先建立语言基础。"].join("")
+                  : TRACK_DESCRIPTIONS[track];
+                return <div class="track-subsection" data-track-section={section}>
+                  <div class="track-section-header"><div class="track-title-wrap"><span class:list={["track-dot", track]}></span><h2>{TRACK_SECTION_LABELS[track][section]}</h2><p>{description}</p></div><span class="track-count">{lessons.length} LESSONS</span></div>
+                  <div class="course-list">
+                    {lessons.map((lesson) => <a class="course-row" href={`/learn/${lesson.track}/${lesson.slug}`} data-lesson-id={lesson.id}>
+                      <span class="course-index">{String(lesson.order).padStart(2, "0")}</span>
+                      <span class="course-copy"><h3>{lesson.title}</h3><p>{lesson.summary}</p></span>
+                      <span class="course-tags">{lesson.concepts.slice(0, 2).map((concept) => <span class="tag">{concept}</span>)}</span>
+                      <span class="course-arrow" aria-hidden="true">↗</span>
+                    </a>)}
+                  </div>
+                </div>;
+              })}
+            </section>;
+         })}
+        </div>
+      </div>
+    </div>
+  </section>
+</BaseLayout>

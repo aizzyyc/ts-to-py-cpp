@@ -1,0 +1,93 @@
+---
+id: common-config
+slug: configuration-environments-and-secrets
+title: "配置、环境变量与密钥边界"
+summary: "让本地、测试和生产环境使用同一套配置契约，并避免把密钥写进代码。"
+track: common
+order: 14
+durationMinutes: 12
+concepts: [configuration, environment, secrets]
+prerequisites: [common-http]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 配置、环境变量与密钥边界
+
+JS/TS 常从 `process.env` 读取配置。Python 和 C++ 也可以读取环境变量，但环境变量本身永远是字符串，缺失、拼写错误和非法数值都要到启动边界处理。真正可靠的做法是启动时集中解析、校验并生成不可变配置，业务模块只接受 `Config`，不在每个函数里重新读取环境。
+
+配置还要区分普通参数和秘密。服务地址、端口、超时、模型名可以记录来源；API key、数据库密码和设备凭据应该由 secret store 或部署环境注入，不能进入源码、日志、异常文本和构建产物。机器人系统还常有频率、坐标系、设备路径和安全阈值，单位必须和数值一起验证。
+
+### 配置要能被验证，而不是到运行时才崩
+
+下面这段代码只保留同一个意图，重点观察输入边界、数据流和失败语义，而不是逐字符翻译。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const port = Number(process.env.PORT ?? 8080);
+const apiKey = process.env.API_KEY;
+if (!apiKey) throw new Error("API_KEY is required");`}
+  targetLabel="Python / C++"
+  targetLanguage="text"
+  target={`# Python
+port = int(os.getenv("PORT", "8080"))
+api_key = os.environ["API_KEY"]
+
+// C++
+const char* raw_port = std::getenv("PORT");
+const char* api_key = std::getenv("API_KEY");`}
+/>
+
+### 从字符串到不可变配置
+
+环境变量只是一种输入，不是类型安全的配置对象。解析函数应完成 trim、类型转换、范围检查和相互约束，例如 `timeout_ms > 0`、HTTPS 地址必须有主机、控制频率不能超过硬件允许值。成功后返回只读配置；失败时指出字段名和原因，但不回显秘密。默认值也要写在契约里，避免本地和生产默默使用不同设置。
+
+```python
+from dataclasses import dataclass
+import os
+
+@dataclass(frozen=True)
+class Config:
+    endpoint: str
+    timeout_s: float
+
+def load_config() -> Config:
+    endpoint = os.environ.get("MODEL_ENDPOINT")
+    if not endpoint:
+        raise RuntimeError("MODEL_ENDPOINT is required")
+    timeout_s = float(os.environ.get("MODEL_TIMEOUT_S", "5"))
+    if timeout_s <= 0:
+        raise RuntimeError("MODEL_TIMEOUT_S must be positive")
+    return Config(endpoint=endpoint, timeout_s=timeout_s)
+```
+
+### 来源优先级与环境隔离
+
+先定义“默认值 < 配置文件 < 环境变量 < CLI”的优先级，再在启动日志中打印字段名和来源。测试不应依赖开发机的环境变量，可以传入一个显式映射；C++ 可在 `main` 中读取 `std::getenv` 后立即转换，Node 则将 `process.env` 变成经过 schema 校验的对象。配置对象一旦创建，传入模型服务、文件适配器和机器人节点。
+
+### 常见错误与排错思路
+
+常见错误是把 `PORT` 当数字比较，或者在模块导入时读取秘密，导致测试顺序和运行环境影响结果。排错时先输出非敏感字段的来源、解析后的类型与有效范围，检查是否加载了错误的 `.env`/配置文件；若生产缺配置，确认部署注入名与代码读取名完全一致。发现密钥被打印或提交后，应立即停止扩散并轮换凭据。
+
+<KeyIdea title="配置要能被验证，而不是到运行时才崩">
+  <p>配置边界清晰后，同一套代码才能安全地跑在本地、CI 和机器人设备上；业务模块无需知道配置来自哪里。</p>
+</KeyIdea>
+
+## 迁移练习
+
+请完成：定义一个包含端口、服务地址和超时的配置对象，并为缺失字段、非法端口、负超时和秘密缺失写出启动错误与安全日志行为。
+
+<Exercise
+  title="配置、环境变量与密钥边界练习"
+  prompt="定义一个包含端口、服务地址和超时的配置对象，并为缺失字段、非法端口、负超时和秘密缺失写出启动错误与安全日志行为。"
+  hint="把字符串解析集中在 load_config 函数，不要让每个模块重复读取环境变量；秘密只检查存在，不打印值。"
+  solution={`先读取所有变量，转换成明确类型并验证端口 1..65535、超时大于 0、地址有合法 scheme；缺少秘密只记录 secret_missing 和字段名，不记录值。成功返回不可变 Config，失败在启动阶段以非零退出码结束。`}
+/>
+
+<SolutionReveal>
+  <p>配置边界清晰后，同一套代码才能安全地跑在本地、CI 和机器人设备上。完成后，请用一份测试环境映射验证配置解析不依赖你当前终端的偶然变量。</p>
+</SolutionReveal>

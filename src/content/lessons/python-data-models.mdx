@@ -1,0 +1,193 @@
+---
+id: python-data-models
+slug: schemas-validation-and-data-contracts
+title: "Schema、校验与数据契约"
+summary: "把动态 JSON 转成可检查的数据模型，为 AI 输入建立明确边界。"
+track: python
+order: 15
+durationMinutes: 16
+concepts: [schema, validation, data contracts]
+prerequisites: [python-sql]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标：把动态 dict 变成可信数据模型
+
+本节结束时，你能从 JavaScript/TypeScript 的对象、`type` 和 schema 解析迁移到 Python 的 `dict`、`TypedDict`、`dataclass` 与运行时校验。你会知道静态类型提示为什么不能替代校验，能够为 id、timestamp、unit、values 和 schema version 写出明确不变量，并把字段级错误、版本迁移和单位转换放在 AI 数据边界，而不是散落在模型调用之后。
+
+外部 JSON 进入程序时是不可信的：字段可能缺失，数字可能是字符串或 NaN，单位可能变了，旧版本可能仍在生产。内部对象则应该让后续函数少做分支。数据模型的目的不是增加类的数量，而是把“哪些输入可以继续流动”定义成可运行、可测试、可审计的契约。
+
+## 从 JS/TS 迁移的心智模型：类型描述不等于运行时验证
+
+JavaScript/TypeScript 常用 `unknown` 加 schema parser：先把外部值当未知，再在边界解析成 `Sample`。Python 的 `TypedDict` 主要给类型检查器看，运行时仍然是普通 dict；`dataclass` 负责组织已经可信的值，不会自动检查构造参数。只有显式的 `from_raw`、校验库或手写 validator 才会在运行时拒绝坏输入。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`type Sample = { id: string; values: number[] };
+function parse(raw: unknown): Sample {
+  return schema.parse(raw);
+}`}
+  targetLabel="Python"
+  targetLanguage="python"
+  target={`@dataclass(frozen=True)
+class Sample:
+    id: str
+    values: tuple[float, ...]
+
+sample = Sample.from_raw(raw)`}
+/>
+
+### 1. TypedDict：描述形状，但不改变对象行为
+
+`TypedDict` 适合描述仍需按键访问的中间 JSON，例如 `id` 必须是字符串、`values` 是数字列表；它不会在 `raw = json.loads(...)` 时插入检查。`total=False` 可以表达可选键，但“键可能不存在”和“键存在且值为 None”仍是两种不同状态。先用类型检查器发现代码路径错误，再用运行时 validator 处理真正来自网络、文件和数据库的输入。
+
+```python
+from typing import TypedDict
+
+class RawSample(TypedDict, total=False):
+    id: str
+    timestamp: int
+    unit: str
+    values: list[float]
+    schema_version: int
+
+def describe(raw: RawSample) -> str:
+    return f"{raw.get('id', '<missing>')}:{raw.get('unit', '<missing>')}"
+```
+
+上面的类型声明不会阻止调用者传入 `{"id": 7}`，也不会把字符串数字自动转换成 float。它的价值是让 IDE 和 pyright/mypy 提示访问错误；真正的拒绝要在输入边界完成。不要通过 `typing.cast` 把不可信 dict 强行“变成”可信对象，cast 只改变静态视角，不改变数据。
+
+### 2. dataclass：承载内部不变量和明确语义
+
+`dataclass` 自动生成初始化、比较和表示方法，`frozen=True` 可以避免对象构造后被随意改写。它仍不会验证 `timestamp` 是否为正、`values` 是否为空或数值是否有限，所以让 `from_raw` 成为唯一入口，先检查再构造。用 `tuple[float, ...]` 表达不可变序列，用字段名表达领域意义，避免返回裸 tuple 让 `values[0]` 的单位无人负责。
+
+```python
+from dataclasses import dataclass
+from math import isfinite
+
+@dataclass(frozen=True)
+class SensorSample:
+    sample_id: str
+    timestamp_ms: int
+    unit: str
+    values: tuple[float, ...]
+    schema_version: int = 1
+
+    @classmethod
+    def from_raw(cls, raw: dict[str, object]) -> "SensorSample":
+        sample_id = raw.get("id")
+        timestamp = raw.get("timestamp_ms")
+        unit = raw.get("unit")
+        raw_values = raw.get("values")
+        if not isinstance(sample_id, str) or not sample_id.strip():
+            raise ValueError("id must be a non-empty string")
+        if not isinstance(timestamp, int) or isinstance(timestamp, bool) or timestamp <= 0:
+            raise ValueError("timestamp_ms must be a positive integer")
+        if unit not in {"celsius", "meter"}:
+            raise ValueError("unit is not supported")
+        if not isinstance(raw_values, list) or not raw_values:
+            raise ValueError("values must be a non-empty list")
+        values = tuple(float(value) for value in raw_values)
+        if not all(isfinite(value) for value in values):
+            raise ValueError("values must be finite")
+        return cls(sample_id, timestamp, unit, values)
+```
+
+这里显式排除了 bool，因为 Python 中 `bool` 是 `int` 的子类；也显式检查了 NaN 和无穷大，因为 `float("nan")` 能转换成功却会污染特征统计。若允许字符串数字，要把这种转换写进契约并记录原始类型，不要让不同调用点各自决定。
+
+### 3. 字段级校验：错误要告诉数据源改哪里
+
+批量任务不一定要遇到第一条坏记录就停止，但必须保留错误路径。可以返回 `list[FieldError]`，每个错误含 sample ID、字段路径、期望类型和安全摘要；关键 schema 版本未知时则让整批失败。校验器还应区分缺失、类型错误、范围错误和单位错误，因为它们的修复责任不同。
+
+```python
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class FieldError:
+    sample_id: str | None
+    path: str
+    code: str
+    detail: str
+
+def validate_raw(raw: object) -> tuple[SensorSample | None, list[FieldError]]:
+    errors: list[FieldError] = []
+    if not isinstance(raw, dict):
+        return None, [FieldError(None, "$", "not_object", "expected JSON object")]
+    sample_id = raw.get("id")
+    if not isinstance(sample_id, str) or not sample_id.strip():
+        errors.append(FieldError(None, "id", "required", "non-empty string required"))
+    try:
+        sample = SensorSample.from_raw(raw)
+    except (TypeError, ValueError) as exc:
+        errors.append(FieldError(
+            sample_id if isinstance(sample_id, str) else None,
+            "sample",
+            "invalid",
+            str(exc),
+        ))
+        return None, errors
+    return sample, errors
+```
+
+示例把 `from_raw` 的整体错误映射成了一个安全错误；更精细的生产实现可在每个字段收集多个错误，但要避免把完整原始 payload 塞进 detail。接受、拒绝和每种错误代码的统计应和输出一起保存，便于数据源团队修复而不是只看到“模型召回下降”。
+
+### 4. 版本、单位和兼容迁移
+
+数据契约会变化。`schema_version` 应当是 payload 的显式字段，v1 到 v2 的兼容转换集中在入口，转换完成后内部只使用一个当前模型。版本升级不能只改类名：timestamp 是秒还是毫秒、temperature 是摄氏还是华氏、values 的顺序有没有变化，都必须写进契约和测试。单位转换要在进入模型前完成，并把转换后的单位记录在对象或运行元数据中。
+
+未知版本应拒绝或进入隔离队列，不能默认按最新字段解释；缺失版本也不要猜。对于线上 API，可以同时接受 v1/v2 一段时间，但输出统一为内部 v2，再由指标观察各版本占比。这样模型输入稳定，升级风险可以在数据边界被看见。
+
+## 运行验证：用合法、边界和坏输入观察结果
+
+准备四个输入：合法记录、`id` 缺失、`values` 含 NaN、unit 未知；另准备 timestamp 为 0 和 values 中包含 0 的记录。运行 `validate_raw`，预期合法记录得到 `SensorSample`，零值被保留，其他记录得到包含字段路径或错误代码的拒绝结果。输出统计应能写成 JSON，例如 `{"accepted":1,"rejected":4,"errors":{"invalid":3,"unit":1}}`，且不包含 token 或原始个人文本。
+
+测试要分别证明 TypedDict 不会替代 runtime validation、dataclass 对直接构造不会自动校验、v1 能迁移且未知版本会拒绝。运行命令可以是 `python -m pytest tests/test_models.py -q`；再用一批混合记录运行数据 job，检查输入、接受、拒绝、按原因统计和 schema version。指标异常时，先比较这些统计，再去分析模型。
+
+## 常见错误、排错与调试路径
+
+把 `if not value` 当作校验会错误拒绝合法的 0、空的可选字符串或 False；把 `float` 转换成功当成数值可信会放过 NaN；用 `cast` 或 `# type: ignore` 会隐藏边界缺陷；把单位写在变量名里却不写进契约，会让后续转换无法审计。另一个常见错误是 v1/v2 共用一套字段读取逻辑，导致秒级 timestamp 被当成毫秒。
+
+排错先打印安全摘要：字段集合、Python 类型、schema version、unit 和错误路径，不打印完整 payload。若线上和本地结果不同，比较校验库/Python 版本、序列化格式和默认值；若拒绝率突然上升，按 error code 和来源版本分组。若模型输入数值异常，检查有限性、单位转换和零值处理，而不是先修改模型阈值。
+
+## 练习：定义传感器输入契约
+
+任务是为一条记录定义 `id`、`timestamp_ms`、`unit`、`values` 和 `schema_version` 的契约：id 非空，时间戳为正整数，unit 只允许 celsius 或 meter，values 非空且全部有限，版本只允许 1 或经过明确迁移的 2。列出缺字段、错误类型、错误范围、NaN 和零值五种验收输入，并决定坏记录是隔离还是让整批失败。
+
+<KeyIdea title="可靠的 AI 管线从可信对象开始">
+  <p>校验不是装饰性的类型标注。它把动态输入的歧义收束在一个边界，并把字段、单位、版本和错误信息传给下游模型与服务。</p>
+</KeyIdea>
+
+<Exercise
+  title="Schema、校验与数据契约练习"
+  prompt="扩展 SensorSample.from_raw：校验 unit 白名单、正 timestamp、有限数值和 schema_version，并返回包含字段路径的错误信息；解析失败时不得继续推理。"
+  hint="把每个字段的检查写成小函数或按顺序检查；显式排除 bool、NaN 和无穷大，区分缺失与 0。"
+  solution={`allowed_units = {"celsius", "meter"}
+version = raw.get("schema_version", 1)
+if version not in {1, 2}:
+    raise ValueError("schema_version is unsupported")
+if raw.get("unit") not in allowed_units:
+    raise ValueError("unit must be celsius or meter")
+timestamp = raw.get("timestamp_ms")
+if not isinstance(timestamp, int) or isinstance(timestamp, bool) or timestamp <= 0:
+    raise ValueError("timestamp_ms must be a positive integer")
+sample = SensorSample.from_raw(raw)`}
+/>
+
+<SolutionReveal>
+  <p>用合法记录、零值、NaN、空 values、未知单位和未知版本逐一验收。每个错误都应告诉调用者改哪里；批处理要输出 accepted/rejected/error code，关键契约失败时不得把未经校验的 dict 送到 embedding 或推理服务。</p>
+</SolutionReveal>
+
+## 与 AI 数据、模型和服务连接
+
+模型输入、HTTP 请求体、SQL row、事件流消息和 CLI 配置都属于数据边界。把它们先解析成 dataclass 或其他可信对象，可以让 embedding、分类、检索和评估函数只接收稳定字段；把 schema version、单位转换、拒绝原因和输入哈希写入运行记录，可以复现一次推理到底使用了什么。
+
+在线服务可以在 API 入口返回字段级 422 错误，在内部日志记录安全的错误路径；离线数据任务则可以把坏记录写入隔离 JSONL，供数据源团队审核。模型服务的错误与输入契约错误要分开统计：前者可能是上游可用性，后者是数据质量或版本兼容问题。
+
+## 小结
+
+TypedDict 描述形状，dataclass 承载可信对象，运行时校验决定数据能否通过边界；版本和单位让契约能演进，字段级错误让问题可以修复。运行验证必须覆盖 0、NaN、NULL/缺失、错误类型、未知版本和合法输入，才能让 AI 数据管线的模型指标建立在可靠对象之上。

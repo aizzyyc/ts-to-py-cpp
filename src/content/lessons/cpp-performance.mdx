@@ -1,0 +1,129 @@
+---
+id: cpp-performance
+slug: memory-layout-and-performance
+title: "内存布局与性能测量"
+summary: "理解缓存、拷贝、移动和基准测试，为机器人实时处理建立性能判断。"
+track: cpp
+order: 21
+durationMinutes: 16
+concepts: [memory, cache, move, benchmark]
+prerequisites: [cpp-queues]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 内存布局与性能测量
+
+C++ 给你更多控制对象布局、分配和拷贝的机会，但“用了 C++ 就一定快”是危险直觉。机器人点云管线的瓶颈可能是缓存未命中、频繁分配、锁等待、序列化或日志，而不是某个循环的语法。先记录消息大小、频率、截止时间、内存上限和线程数，再用基准与 profiler 验证假设。
+
+### 数据结构影响访问路径
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const output = rows.map((row) => ({
+  ...row,
+  score: scoreRow(row),
+}));`}
+  targetLabel="C++"
+  targetLanguage="cpp"
+  target={`std::vector<Result> output;
+output.reserve(rows.size());
+for (const auto& row : rows) {
+  output.push_back(Result{row, score_row(row)});
+}`}
+/>
+
+`vector` 连续存储，批量扫描时通常更容易被缓存预取；`list` 的节点分散，虽然插入某处便宜，却可能让每次访问都等待内存。结构数组（AoS）适合按完整检测处理，数组结构（SoA）适合只批量处理 `x/y/z` 字段。没有访问模式和测量，不能断言某种布局更高级。
+
+### 观察拷贝、容量和布局
+
+```cpp
+#include <cstddef>
+#include <vector>
+
+struct Point { float x; float y; float z; std::uint32_t intensity; };
+
+std::vector<Point> make_scan(std::size_t count) {
+  std::vector<Point> scan;
+  scan.reserve(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    scan.push_back(Point{static_cast<float>(i), 0.0F, 1.0F, 100U});
+  }
+  return scan;
+}
+```
+
+`reserve` 只减少可能的扩容，不改变元素数量；过大的预留会占用内存并影响缓存。按值传递小结构便于优化，点云缓冲区则应通过借用或移动避免复制。`std::move` 只改变值类别，不等于线程安全，也不保证一次调用一定没有分配。优化前后必须检查输出校验和，否则编译器可能把没有可观察结果的工作消掉。
+
+### 用数据证明热点
+
+稳定 benchmark 要固定输入规模、随机种子、编译器选项和机器；先热身，再多次采样，报告中位数、p99 和分配次数。`std::chrono::steady_clock` 适合测间隔，wall time 还会受调度影响。Profiler 应回答“时间花在哪里”，计数器/自定义 allocator 回答“分配了多少”，不要只看一次总耗时就重写算法。
+
+### 常见编译与运行时问题
+
+`sizeof(Point)` 大于字段之和是 padding 和对齐，不是编译器浪费；跨网络序列化不能直接写结构体内存。结果偶尔变慢时检查 vector 扩容、NUMA、锁竞争和日志。Release 更快但可能改变时序，Debug 下的结论不能直接外推到控制循环。越界或未对齐访问还可能先表现为性能异常，先跑 Sanitizer 再做微优化。
+
+### 学习目标
+
+完成本节后，你能根据访问模式选择 AoS 或 SoA，解释 `vector` 的容量、拷贝和移动，写出不会被编译器消掉的 benchmark，并用 p99、分配次数和 checksum 验证点云优化。性能结论必须和传感器帧大小、频率、内存上限及控制 deadline 一起看。
+
+### 用 checksum 保证 benchmark 有效
+
+```cpp
+#include <chrono>
+#include <iostream>
+
+auto started = std::chrono::steady_clock::now();
+auto output = process(scan);
+auto finished = std::chrono::steady_clock::now();
+std::cout << output.size() << ' ' << checksum(output) << ' '
+          << (finished - started).count() << '\n';
+```
+
+编译用 `g++ -std=c++20 -O2 -pthread bench.cpp -o bench`，先 warm up，再重复采样并保存 p50/p95/p99。`checksum` 和数量是可观察结果，能避免“空 benchmark”被优化掉；输入要固定随机种子，输出要验证正确。
+
+### AoS、SoA 与所有权
+
+```cpp
+struct Points { std::vector<float> x, y, z; };
+float sum_x(const Points& points) {
+  return std::accumulate(points.x.begin(), points.x.end(), 0.0F);
+}
+```
+
+只批量计算 x 或距离时，SoA 减少无用字段加载；完整处理一个点时 AoS 更自然。布局转换本身有成本，`std::move` 也不代表没有分配。异步队列中使用借用引用会带来生命周期风险，优先明确值拷贝、移动或拥有指针，再测量代价。
+
+### 从 JS/TS 迁移的性能反例
+
+JS 的 `map` 经常隐式创建新数组，C++ 直接照搬可能让临时 vector 成为热点；但为了省一次拷贝把引用交给后台线程，又可能读到已销毁数据。`reserve` 只减少扩容，不保证整体更快；Debug 与 Release 也不能互相推断。先用 profiler 找热点，再用 Sanitizer 排除未定义行为，最后以结果和 p99 验收。
+
+### 机器人性能验收
+
+为 100000 点和真实回放帧分别记录 `alloc_count`、queue wait、serialization time、checksum、p50/p99 和 frame sequence。若平均值变快而 p99 超过控制预算，优化不合格；若 reserve 降低扩容但瓶颈在锁或序列化，应停止微优化并转向正确的热点。
+
+### 常见错误与排错路径
+
+结果变快但 checksum 不一致，先检查输入是否相同和 benchmark 是否被优化掉；`capacity` 暴涨时检查 reserve 估算与临时 vector；p99 尖峰时依次查看分配、锁等待、日志和 page fault。若 Sanitizer 报告越界，先修内存契约再比较性能；若 profiler 显示序列化占大头，就不要继续微调循环。
+
+<KeyIdea title="性能优化必须同时看布局和尾延迟">
+  <p>连续存储、少分配和移动可以降低平均成本，但机器人更关心最坏耗时。用相同输入校验结果、测量分配和 p99，再决定是否引入对象池或特殊布局。</p>
+</KeyIdea>
+
+## 迁移练习
+
+为 100000 个距离检测写两个版本：vector 不预留与 `reserve` 版本；再比较 AoS 逐对象评分和 SoA 只扫描距离字段。记录结果校验和、平均耗时、p99、容量变化，并说明你的优化是否会影响实时内存上限。
+
+<Exercise
+  title="为点云处理建立可复现基准"
+  prompt="固定输入和编译选项，比较 reserve 前后以及两种布局的处理；要求输出数量和校验和一致，并列出下一步 profiler 问题。"
+  hint="不要测空函数；把 checksum 作为可观察结果，分别记录 allocation、cache 和锁等待的证据。"
+  solution={`可以先 make_readings(100000)，分别运行 process_without_reserve 和 process_with_reserve，用 steady_clock 采样多次，比较 result.size 与 checksum。若 reserve 降低扩容但 p99 没变，下一步检查锁、序列化或调度，而不是继续加容量。`}
+/>
+
+<SolutionReveal>
+  <p>内存布局只有放进真实访问路径和测量结果才有意义。下一节会把平均性能进一步收紧为周期、截止时间和确定性契约。</p>
+</SolutionReveal>

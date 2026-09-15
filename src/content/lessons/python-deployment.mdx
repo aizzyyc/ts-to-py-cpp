@@ -1,0 +1,298 @@
+---
+id: python-deployment
+slug: model-api-and-service-deployment
+title: "模型 API 与服务部署"
+summary: "将推理能力包装成 HTTP API，补齐输入校验、健康检查和版本信息。"
+track: python
+order: 28
+durationMinutes: 18
+concepts: [api, health check, serving]
+prerequisites: [python-inference]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+本节把已经验证过的推理函数放进一个可运维的 HTTP 服务。完成后你能够：
+
+- 为预测接口定义输入、输出、shape、dtype、有限值和最大资源边界。
+- 区分进程存活 healthz、模型就绪 readyz 和业务预测的失败语义。
+- 把校验失败、未就绪、超时、资源不足和未知异常映射成稳定响应。
+- 在启动、发布和回滚时记录模型版本、代码版本、设备和配置，而不泄露敏感数据。
+
+## 从 JS/TS 迁移的心智模型
+
+JavaScript/TypeScript 开发者熟悉 Express 或 Fastify 的 route handler：读取 request body，调用异步函数，返回 JSON。模型服务多了几个必须显式的边界：权重是否已经加载，输入是否符合训练时的特征顺序，GPU 是否有资源，响应是否在超时前产生。FastAPI 只提供路由工具，输入契约、版本和运维语义仍要由我们设计。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`app.post("/predict", async (request, response) => {
+  const output = await predict(request.body);
+  response.json({ output, modelVersion });
+});`}
+  targetLabel="Python / FastAPI"
+  targetLanguage="python"
+  target={`@app.post("/predict")
+def predict_route(request: PredictionRequest):
+    output = predictor.predict(request.features)
+    return {"output": output, "model_version": MODEL_VERSION}`}
+/>
+
+<KeyIdea title="路由只是边界，模型契约才是核心">
+  <p>一个返回 200 的进程不等于可用服务。输入验证、就绪状态、版本、超时和错误代码共同决定客户端能否安全使用结果。</p>
+</KeyIdea>
+
+## 输入和输出契约
+
+请求应明确 request_id、features 的字段名、长度、顺序、单位和允许范围。训练时若特征顺序是 temperature、pressure、speed，服务不能接受一个同样长度但顺序不同的数组。shape 通常是单请求的 features 或批量的 batch、features；API 层要决定是否允许批量，并限制总元素数，避免一个请求占满 GPU。
+
+数值校验不仅是类型校验。JSON 能解析数字，但 NaN、Infinity、极端值、空数组和过长数组仍可能通过普通类型声明。输出要能 JSON 序列化，不能直接返回 CUDA Tensor、numpy scalar 或包含 NaN 的概率。响应中带 model_version 和 request_id，客户端和日志才能关联同一次推理。
+
+### 示例一：定义请求模型并做业务校验
+
+```python
+import math
+from pydantic import BaseModel
+
+MAX_FEATURES = 128
+
+class PredictionRequest(BaseModel):
+    request_id: str
+    features: list[float]
+
+def validate_request(request: PredictionRequest):
+    if not request.request_id.strip():
+        raise ValueError("request_id must not be empty")
+    if not 1 <= len(request.features) <= MAX_FEATURES:
+        raise ValueError("feature count is outside the allowed range")
+    if not all(math.isfinite(value) for value in request.features):
+        raise ValueError("features must be finite")
+    return request
+
+request = validate_request(
+    PredictionRequest(request_id="demo-1", features=[0.2, 10.0, 0.4])
+)
+print({"request_id": request.request_id, "feature_count": len(request.features)})
+```
+
+运行结果应显示 request_id 和 feature_count，而不输出完整敏感输入。Pydantic 负责 JSON 到 Python 类型的第一层解析，validate_request 负责模型实际需要的有限值、长度和业务范围。若模型只接收 3 个特征，还应在这里检查恰好为 3，并把期望 shape 写进 error code。
+
+## healthz、readyz 与启动加载
+
+healthz 只回答进程是否还活着，通常不读取模型，也不因为上游依赖暂时不可用而阻塞；readyz 才回答实例是否加载了 checkpoint、初始化了 device、完成 warmup 并可以接流量。负载均衡应依据 readyz 分流，发布时先等待 ready，再逐步放量。
+
+模型加载放在应用启动生命周期，不要在每个请求中 torch.load。加载失败应让 readyz 失败并记录安全的原因；一个永远返回 200 但内部 predictor 为 None 的服务会把故障扩大到所有客户端。响应可以公开模型版本和设备类型，但不要公开本地路径、环境变量值、token 或完整异常堆栈。
+
+### 示例二：实现健康和就绪探针
+
+```python
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+
+app = FastAPI()
+predictor = None
+MODEL_VERSION = "event-classifier-2026-09"
+DEVICE_NAME = "cpu"
+
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}
+
+@app.get("/readyz")
+def readyz():
+    if predictor is None:
+        return JSONResponse(
+            status_code=503,
+            content={"ready": False, "model_version": MODEL_VERSION},
+        )
+    return {
+        "ready": True,
+        "model_version": MODEL_VERSION,
+        "device": DEVICE_NAME,
+    }
+
+def load_at_startup():
+    global predictor, DEVICE_NAME
+    predictor = load_predictor("artifacts/best.pt")
+    DEVICE_NAME = str(predictor.device)
+```
+
+启动前访问 readyz 的结果应是 503；加载并 warmup 成功后才变为 200。healthz 仍能是 200，因为进程活着但没有业务能力。测试时分别覆盖 checkpoint 路径错误、设备不可用、模型 shape 不匹配和正常启动，确认每种状态都能从日志和探针看出来。
+
+## 错误映射和超时边界
+
+客户端需要稳定地知道是否应该修复请求、重试还是报警。常见约定是：422 表示 JSON/schema 无法解析，400 表示字段值或 shape 不符合业务契约，503 表示模型未就绪或暂时资源不足，504 表示推理超过预算，500 表示未预期的服务错误。错误响应包含 request_id 和 error_code，detail 只给可行动的信息。
+
+服务层不能把所有 Exception 都返回 200，也不能把原始堆栈暴露给客户端。日志应记录异常类型、阶段、版本、设备和耗时；对输入只记 shape、dtype、范围摘要或哈希。超时要覆盖队列、预处理、device 拷贝和模型前向；多 worker 使用 GPU 时要先计算每个进程的显存副本。
+
+### 示例三：预测路由的校验和错误转换
+
+```python
+from fastapi import HTTPException
+
+@app.post("/predict")
+def predict_route(request: PredictionRequest):
+    try:
+        validate_request(request)
+        if predictor is None:
+            raise HTTPException(
+                status_code=503,
+                detail={"error_code": "model_not_ready", "request_id": request.request_id},
+            )
+        output = predictor.predict(
+            request.features,
+            request_id=request.request_id,
+            model_version=MODEL_VERSION,
+        )
+        return {
+            "request_id": request.request_id,
+            "model_version": MODEL_VERSION,
+            "output": output,
+        }
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail={"error_code": "invalid_input", "message": str(error),
+                    "request_id": request.request_id},
+        ) from error
+    except TimeoutError as error:
+        raise HTTPException(
+            status_code=504,
+            detail={"error_code": "inference_timeout", "request_id": request.request_id},
+        ) from error
+    except HTTPException:
+        raise
+    except RuntimeError as error:
+        raise HTTPException(
+            status_code=500,
+            detail={"error_code": "inference_failed", "request_id": request.request_id},
+        ) from error
+```
+
+这里没有把 RuntimeError 的完整内容返回给客户端，日志中才保留脱敏后的诊断上下文。生产代码还应区分 resource_exhausted、checkpoint_corrupt 和 unexpected_failure，并在中间件中生成 request_id。异常转换要有测试，否则一次重构就可能把可重试的 503 变成永久的 400。
+
+## 版本、进程和发布策略
+
+model_version 应来自不可变 checkpoint 或发布清单，不要每次启动自动取当前时间造成无法比较。记录代码版本、data_version、feature_names、预处理版本、Python/torch 版本、device 和配置；返回给客户端的版本可以短而稳定，内部 manifest 保存完整信息。
+
+CPU 服务可以通过多 worker 增加并发，但每个 worker 可能加载一份模型；GPU 服务通常要谨慎设置 worker，避免显存复制和上下文竞争。容器启动时做模型加载和 warmup，滚动发布先等 readyz，再切少量流量，观察延迟、错误率和预测分布。回滚必须能指向上一个 checkpoint，不能只回滚代码却保留不兼容的权重。
+
+## 运行、输出与验证
+
+部署验收至少包含五类请求：
+
+```text
+# 合法请求，期望 200，并检查 request_id、model_version、output
+curl -X POST http://localhost:8000/predict ^
+  -H "content-type: application/json" ^
+  -d "{\"request_id\":\"demo-1\",\"features\":[0.2,10.0,0.4]}"
+
+# 超长、NaN、空 features、模型未加载、推理超时分别验证 400、400、400、503、504
+```
+
+Windows 命令中的转义只是示意，实际可用客户端还应检查响应 body 的 error_code。自动化测试用 TestClient 覆盖正常响应、schema 错误、非法数值、readyz 状态、predictor 超时和模型异常；验证响应可被 JSON 编码，output 的 shape、有限性和版本正确。运行日志输出启动耗时、warmup 耗时、每阶段延迟和资源摘要，不打印密钥或原始音频。
+
+## 常见错误、排错与调试
+
+- healthz 200 但业务全 503：区分进程存活和模型就绪，查看 startup 日志、checkpoint、device 和 readyz。
+- 返回 422/500 不稳定：先确定 schema 错误、业务值错误和推理异常的边界，再用固定 error_code 测试。
+- JSON 序列化失败：检查 Tensor、numpy scalar、NaN、Inf 和 GPU 对象，统一在推理层转 CPU Python 类型。
+- 首请求特别慢：确认模型是否启动加载、warmup 是否完成，分开记录加载和业务 latency。
+- GPU OOM：查看 worker 数、模型副本、batch/输入上限和并发队列；先拒绝超限请求再调整资源。
+- 版本对不上：比较响应 model_version、checkpoint manifest、feature_names、data_version 和代码版本。
+- 预测超时但进程不退出：检查队列、拷贝、前向和后处理是否都在预算中，设计取消或隔离策略。
+- 日志泄密：搜索 request body、token、路径和异常堆栈，改为 request_id、shape、范围摘要和错误码。
+
+## 练习与任务
+
+设计一个可运维的模型服务：实现 PredictionRequest、healthz、readyz、predict；输入必须是有限的固定维度 float 数组，输出带 request_id 和 model_version；为 invalid_input、model_not_ready、inference_timeout、resource_exhausted 和 inference_failed 定义响应；写 TestClient 验证状态码、JSON 可序列化和探针切换。
+
+<Exercise
+  title="模型 API 部署练习"
+  prompt="把上一节 Predictor 接入 FastAPI，补齐请求校验、启动加载、健康/就绪探针、错误映射和版本返回；用合法、NaN、超长、未就绪、超时五类请求运行验证。"
+  hint="healthz 不代表模型已加载；readyz 在 predictor 为 None 时返回 503；不要在路由里重新读取 checkpoint；测试 error_code 和 request_id。"
+  solution={`@app.get("/readyz")
+def readyz():
+    if predictor is None:
+        return JSONResponse(status_code=503, content={"ready": False})
+    return {"ready": True, "model_version": MODEL_VERSION}
+
+@app.post("/predict")
+def predict_route(request: PredictionRequest):
+    validate_request(request)
+    if predictor is None:
+        raise HTTPException(status_code=503, detail="model_not_ready")
+    return predictor.predict(request.features, request.request_id, MODEL_VERSION)`}
+/>
+
+### 完整答案
+
+```python
+class ServiceState:
+    def __init__(self):
+        self.predictor = None
+        self.model_version = "event-classifier-2026-09"
+
+state = ServiceState()
+
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}
+
+@app.get("/readyz")
+def readyz():
+    if state.predictor is None:
+        return JSONResponse(
+            status_code=503,
+            content={"ready": False, "model_version": state.model_version},
+        )
+    return {"ready": True, "model_version": state.model_version}
+
+@app.post("/predict")
+def predict(request: PredictionRequest):
+    try:
+        validate_request(request)
+        if state.predictor is None:
+            raise HTTPException(status_code=503, detail="model_not_ready")
+        result = state.predictor.predict(
+            request.features,
+            request_id=request.request_id,
+            model_version=state.model_version,
+        )
+        return {
+            "request_id": request.request_id,
+            "model_version": state.model_version,
+            "result": result,
+        }
+    except HTTPException:
+        raise
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail={"error_code": "invalid_input", "request_id": request.request_id},
+        ) from error
+    except TimeoutError as error:
+        raise HTTPException(
+            status_code=504,
+            detail={"error_code": "inference_timeout", "request_id": request.request_id},
+        ) from error
+```
+
+用 TestClient 或 curl 运行并保存响应样例；再模拟 predictor 抛出 RuntimeError，确认有统一的 500 映射和脱敏日志。最后检查多 worker 与 GPU 的资源估算、发布清单和回滚 checkpoint，服务的“完成”才不仅是路由能返回一次结果。
+
+<SolutionReveal>
+  <p>部署的最小闭环是：契约校验、模型就绪、推理预算、稳定错误、版本响应和可探测状态。它把 Python 模型变成了其他服务可以安全依赖的能力。</p>
+</SolutionReveal>
+
+## 与同一 AI 项目主线的连接
+
+evaluation 选出的 checkpoint 和 inference 的 Predictor 是服务的内部实现；本节把它们放进 HTTP 输入输出契约。pandas/NumPy 的 feature order、shape、dtype 和有限值检查必须在 API 入口再验证，不能假设所有客户端都来自同一个 Python 进程。服务的 latency、error_rate、readyz 状态、预测分布和 model_version 会成为下一节 MLOps 的监控输入。
+
+## 小结
+
+模型部署不是加一个 POST 路由，而是定义谁可以调用、什么输入有效、何时实例就绪、失败是否可重试、模型版本是什么以及资源如何受限。用 healthz 和 readyz 区分活着与能服务，用 400/422/503/504/500 表达不同故障，用启动加载、版本清单、超时和 JSON 验证保护运行边界。这样线上结果才能与离线评估真正对应。

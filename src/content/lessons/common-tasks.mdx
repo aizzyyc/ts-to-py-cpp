@@ -1,0 +1,83 @@
+---
+id: common-tasks
+slug: tasks-threads-and-scheduling
+title: "任务、线程与调度"
+summary: "区分并发、并行和异步，建立从事件循环到线程池的统一模型。"
+track: common
+order: 16
+durationMinutes: 16
+concepts: [tasks, threads, scheduling]
+prerequisites: [common-processes]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 任务、线程与调度
+
+Node.js 的 event loop 适合等待 I/O，但 CPU 密集工作会阻塞循环。Python 和 C++ 提供线程、进程或任务库，但选择仍然取决于工作负载、数据大小、共享状态和截止时间。迁移 Promise 的经验时，要把“任务”理解成可调度单元：它有输入、开始时刻、资源、结果、取消方式和异常归属，而不是一个自动变快的关键字。
+
+网络请求十个一组适合异步或线程池；图像预处理和模型推理可能需要进程、原生库或 GPU；实时控制通常需要固定周期线程和有界工作量。先测量每项工作是在等待、占 CPU，还是被锁和队列阻塞，再选择执行器。并发度过高会耗尽连接、内存或 GPU 显存，过低则浪费吞吐，不能靠直觉永久固定。
+
+### 先判断等待，还是计算
+
+下面这段代码只保留同一个意图，重点观察输入边界、数据流和失败语义，而不是逐字符翻译。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const results = await Promise.all(urls.map(fetchJson));
+const summary = results.map(summarize);`}
+  targetLabel="Python / C++"
+  targetLanguage="text"
+  target={`# Python
+async def load_all(urls):
+    results = await asyncio.gather(*(fetch_json(url) for url in urls))
+    return [summarize(item) for item in results]
+
+// C++
+std::vector<std::future<Item>> jobs;
+for (const auto& url : urls) jobs.push_back(pool.submit(load, url));`}
+/>
+
+### 从 Promise 到执行器
+
+并发是同时推进，只有多核执行才一定涉及并行。`Promise.all`、`asyncio.gather` 和 C++ future 都能表达等待多个结果，但对异常、取消和资源释放的默认行为不同。给任务编号并保留输入顺序，使用有界池限制同时运行的数量；机器人系统还要给任务设置 deadline，过期结果应丢弃或降级。
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+def load_all(urls: list[str]) -> list[dict]:
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(fetch_json, url) for url in urls]
+        return [future.result() for future in futures]
+```
+
+### 选择 async、线程还是进程
+
+async 适合大量等待且客户端支持异步；线程池适合阻塞 I/O 或能释放 GIL 的库调用；进程池适合隔离重计算，但序列化输入输出会有成本。C++ 线程池适合共享受控资源，任务队列应定义关闭和拒绝策略。Node 里可以用 worker thread 或子进程承载重计算，但不要把大对象无界复制给每个 worker。
+
+### 常见错误与排错思路
+
+常见错误是把十个 CPU 密集任务放进一个 event loop，或者创建任务后既不保存也不等待，导致异常无人读取。排错时记录 task_id、排队时间、运行时间、执行器和取消原因，观察队列长度与 CPU 使用率；若延迟抖动，比较并发度、锁等待和 GC/分配时间。先用一个任务复现，再逐步增加并发，能区分逻辑错误与资源饱和。
+
+<KeyIdea title="先判断等待，还是计算">
+  <p>统一理解任务调度，才能把 Promise 经验迁移到 asyncio 和机器人回调线程；先辨别资源瓶颈，再决定执行器和并发上限。</p>
+</KeyIdea>
+
+## 迁移练习
+
+请完成：给一个同时请求十个服务的任务选择 async、线程池或进程池，并说明理由；再规定最多并发数、单项超时、取消动作和一个任务失败后的行为。
+
+<Exercise
+  title="任务、线程与调度练习"
+  prompt="给一个同时请求十个服务的任务选择 async、线程池或进程池，并说明理由；再规定最多并发数、单项超时、取消动作和一个任务失败后的行为。"
+  hint="先判断请求是否主要等待网络，是否需要共享内存，再写出队列和异常处理策略。"
+  solution={`网络 I/O 优先 async 并限制 4 个并发；独立 CPU 工作可用进程池但需注意序列化；需要共享 C++ 状态时使用受控线程池和明确同步。每项设置 deadline，失败时取消未开始任务并等待已开始任务清理。`}
+/>
+
+<SolutionReveal>
+  <p>统一理解任务调度，才能把 Promise 经验迁移到 asyncio 和机器人回调线程。完成后，请用计时、队列长度和失败计数验证你的执行器选择。</p>
+</SolutionReveal>

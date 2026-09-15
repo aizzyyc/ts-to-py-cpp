@@ -1,0 +1,92 @@
+---
+id: common-performance
+slug: performance-and-observability-basics
+title: "性能与可观察性：先测量再优化"
+summary: "建立时间、内存、吞吐和日志指标的基本直觉，避免凭感觉优化。"
+track: common
+order: 24
+durationMinutes: 14
+concepts: [performance, memory, profiling, metrics]
+prerequisites: [common-observability]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 性能与可观察性：先测量再优化
+
+C++ 让你可以更直接地控制对象布局、分配和拷贝，Python 则常把热点交给 NumPy 或 native 库，JS/TS 也会受到事件循环、对象分配和序列化的影响。无论语言如何，都应先定位瓶颈再优化。性能问题可能是单次延迟、吞吐不足、峰值内存、启动慢或尾延迟抖动，指标不同，优化方向也不同。
+
+迁移时不要把 C++ 的“更接近硬件”当作自动更快，也不要把 Python 循环直接搬进 C++ 就认为问题解决。数据复制、缓存命中、批大小、网络等待和模型调用往往比某个表达式更关键。先固定输入规模和环境，建立基线，再用 profiler 或 tracing 找到最贵的阶段。
+
+### 性能来自数据流和测量
+
+下面这段代码只保留同一个意图，重点观察输入边界、数据流和失败语义，而不是逐字符翻译。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const start = performance.now();
+const output = input.map(transform);
+console.log(performance.now() - start);`}
+  targetLabel="Python / C++"
+  targetLanguage="text"
+  target={`# Python
+start = time.perf_counter()
+output = [transform(item) for item in input]
+print(time.perf_counter() - start)
+
+// C++
+auto start = Clock::now();
+auto output = transform_all(input);
+log(elapsed_ms(start));`}
+/>
+
+### 先建立可比较的基线
+
+区分启动时间、单次延迟、吞吐和峰值内存；基准测试固定输入规模、预热次数、重复次数和环境，避免把缓存冷热或网络噪声当成算法差异。记录 p50/p95，而不只看平均值。AI 管线还要记录 batch size、dtype 和设备；机器人程序要记录控制周期、deadline miss 和每个阶段的预算。
+
+```python
+import time
+
+def benchmark(fn, samples, repeats=5):
+    for _ in range(2):
+        fn(samples)  # warm-up
+    durations = []
+    for _ in range(repeats):
+        start = time.perf_counter()
+        fn(samples)
+        durations.append(time.perf_counter() - start)
+    durations.sort()
+    return {"p50": durations[len(durations) // 2],
+            "p95": durations[min(len(durations) - 1, int(len(durations) * .95))]}
+```
+
+### 从数据流找真正的热点
+
+先问数据是否被重复解析、复制或转换。Python 可把循环交给 NumPy/批量库，C++ 可减少不必要的分配并使用移动语义，Node 可把 CPU 热点移出 event loop；但这些改动只有在 profile 证明热点在那里时才值得做。缓存要定义失效和容量，批处理要权衡吞吐与单项延迟，不能只追求最高 benchmark 数字。
+
+### 常见错误与排错思路
+
+常见错误是用一次 `Date.now()` 比较两个微小函数，或者在开发机上用一条小样本代表生产规模。排错时先确认测量边界包含了什么，再用 profiler、内存快照和系统指标定位；如果优化后变快但错误率、峰值内存或 p95 变坏，不能称为成功。保留前后基线、输入和编译/运行时版本，避免优化结果不可复现。
+
+<KeyIdea title="性能来自数据流和测量">
+  <p>性能判断是一种工程习惯，不是某种语言的神秘技巧：先定义指标和基线，再针对被证实的瓶颈优化。</p>
+</KeyIdea>
+
+## 迁移练习
+
+请完成：为一个数据转换函数设计最小 benchmark，比较循环、批量库调用和缓存，并写出输入规模、预热、重复次数、p50/p95 和峰值内存的记录方式。
+
+<Exercise
+  title="性能与可观察性：先测量再优化练习"
+  prompt="为一个数据转换函数设计最小 benchmark，比较循环、批量库调用和缓存，并写出输入规模、预热、重复次数、p50/p95 和峰值内存的记录方式。"
+  hint="先确定输入规模、重复次数和需要观察的指标，保持环境和数据不变。"
+  solution={`准备 1K、100K 和生产近似样本，预热 2 次后重复 5 次，记录 p50/p95、吞吐、峰值 RSS/显存与错误率。先比较无缓存、批量和缓存版本，只有在基线稳定且瓶颈被 profile 证实后才采用优化。`}
+/>
+
+<SolutionReveal>
+  <p>性能判断是一种工程习惯，不是某种语言的神秘技巧。完成后，请保留基线和优化后的同一组结果，并检查延迟、内存与正确性没有互相牺牲。</p>
+</SolutionReveal>

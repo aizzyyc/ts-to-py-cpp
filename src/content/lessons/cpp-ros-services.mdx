@@ -1,0 +1,155 @@
+---
+id: cpp-ros-services
+slug: ros2-services-actions-and-feedback
+title: "ROS 2 Service、Action 与反馈"
+summary: "区分短请求和长任务，设计可取消、带反馈和结果的机器人接口。"
+track: cpp
+order: 26
+durationMinutes: 20
+concepts: [service, action, feedback]
+prerequisites: [cpp-ros-topics]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## ROS 2 Service、Action 与反馈
+
+HTTP request、事件通知和长轮询对应不同时间尺度。ROS 2 service 是一次请求/响应，适合切换模式、查询状态或快速校验；action 为长任务定义 goal、feedback、result 和 cancel，适合导航、抓取和校准。把几十秒的任务硬塞进 service，会让客户端超时、重试和“到底完成没有”变得含糊。
+
+## 学习目标
+
+- 能把一次查询、可取消长任务和持续状态流分别选择为 service、action 和 topic。
+- 能从 JS/TS 的 Promise、AbortSignal 和 progress callback 迁移到 goal、feedback、result 和 cancel 状态机。
+- 能为 service/action 设计可观察日志，并用 CLI 验证接受、取消、失败和完成的结果。
+
+### 接口类型表达任务时间尺度
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const result = await robot.moveTo(goal, {
+  onProgress: reportProgress,
+  signal: controller.signal,
+});`}
+  targetLabel="C++ / ROS 2"
+  targetLanguage="cpp"
+  target={`service_->async_send_request(request, response_callback);
+action_client_->async_send_goal(goal, send_options);
+action_client_->async_cancel_goal(goal_handle);`}
+/>
+
+service 回调要快速返回结果或错误码，不应在 executor 线程里同步等待硬件。action server 收到 goal 后应验证资源和前置条件，再周期性发布 feedback；取消请求要与控制器合作停在安全点，不能只把一个标志设为 false 就宣称已取消。结果应包含成功、取消、失败和原因，而不是只有布尔值。
+
+### action server 的状态机
+
+```cpp
+using GoalHandle = rclcpp_action::ServerGoalHandle<MoveTo>;
+
+void execute(const std::shared_ptr<GoalHandle>& handle) {
+  auto result = std::make_shared<MoveTo::Result>();
+  auto feedback = std::make_shared<MoveTo::Feedback>();
+  while (!reached_goal(handle->get_goal())) {
+    if (handle->is_canceling()) {
+      stop_motion_safely();
+      result->error_code = MoveTo::Result::CANCELED;
+      handle->canceled(result);
+      return;
+    }
+    feedback->remaining_m = remaining_distance();
+    handle->publish_feedback(feedback);
+  }
+  result->error_code = MoveTo::Result::SUCCEEDED;
+  handle->succeed(result);
+}
+```
+
+这是执行逻辑骨架，实际 action 类型字段和线程装配由接口包决定。执行循环要有时间/硬件故障退出条件，`is_canceling` 不应隔很久才检查。一个目标句柄的寿命要覆盖异步回调；不要捕获局部 result 的裸地址。多个 goal 是否排队、抢占还是拒绝，也必须写进 server 契约。
+
+### Service 的错误边界
+
+“设置最大速度”可用 service，响应携带 `accepted`、旧值和错误文本；“移动到位”用 action。客户端要处理服务不存在、超时和节点重启，不能把 transport 成功当成业务成功。重试前检查命令是否幂等，否则网络重发可能让机械臂执行两次动作。
+
+### 常见编译、链接、运行时错误
+
+找不到 action 生成头文件，检查接口包先构建并在运行包声明依赖；链接失败看 action type support 是否进入 target。服务一直等待通常是 server 未启动、名称被 namespace 改写或回调被阻塞。action 取消后机器人仍运动，检查 cancel 到控制器的路径和安全停止确认；客户端退出时，要处理未完成 goal 的结果回调，避免访问已销毁对象。
+
+<KeyIdea title="接口的时间尺度决定恢复策略">
+  <p>Service 解决短请求，action 管理可反馈、可取消的长任务。goal、feedback、result、cancel 和资源占用必须共同组成状态机。</p>
+</KeyIdea>
+
+## 迁移练习
+
+为“移动到目标点”定义 action：goal 包含目标位姿和最大速度，feedback 包含进度/剩余距离，result 包含状态、最终位姿和错误码。再为“读取当前校准”定义 service，列出超时、节点重启和重复请求时的处理。
+
+<Exercise
+  title="为移动任务画出 action 状态机"
+  prompt="选择 service 或 action，设计 goal/feedback/result/cancel 字段，并写出 server 在接受、执行、取消、失败和完成时的行为。"
+  hint="长任务要定期检查取消、发布反馈并在硬件错误时结束；服务结果要能区分传输成功和业务接受。"
+  solution={`移动使用 action；goal 为目标位姿/速度上限，feedback 为已行进距离/剩余距离，result 为 SUCCEEDED/CANCELED/FAILED 与错误码。执行线程在每个控制周期检查 cancel 和硬件故障，安全停止后再确认 canceled；校准查询可用 service 并返回 accepted、值和原因。`}
+/>
+
+### 先写一个真正短的 service
+
+查询电池状态、重置错误计数和切换传感器模式通常应在一次回调内完成。service 回调不应该启动一个几十秒的导航任务，更不能在回调中忙等硬件。
+
+```cpp
+using Trigger = std_srvs::srv::Trigger;
+service_ = create_service<Trigger>(
+  "/reset_faults",
+  [this](Trigger::Request::SharedPtr, Trigger::Response::SharedPtr response) {
+    if (!fault_store_.reset()) {
+      response->success = false;
+      response->message = "controller is not ready";
+      return;
+    }
+    response->success = true;
+    response->message = "faults reset";
+  });
+```
+
+运行 `ros2 service type /reset_faults` 和 `ros2 service call /reset_faults std_srvs/srv/Trigger {}`，同时观察服务端日志。请求成功只表示服务端接受并完成了短操作，不代表机器人已经移动到某个位置。
+
+### Action 的 goal、feedback 和 cancel
+
+导航、抓取、标定等任务要能报告进度和响应取消。客户端应监听 `GoalResponse`、`Feedback` 与 `Result`，服务端则在循环中检查 `goal_handle->is_canceling()` 和 `rclcpp::ok()`。取消不是异常；它应有明确的终态和清理动作。
+
+```cpp
+void execute(const std::shared_ptr<GoalHandle> handle) {
+  for (int step = 0; step < 10; ++step) {
+    if (handle->is_canceling()) {
+      auto result = std::make_shared<Action::Result>();
+      result->success = false;
+      handle->canceled(result);
+      return;
+    }
+    auto feedback = std::make_shared<Action::Feedback>();
+    feedback->progress = (step + 1) / 10.0;
+    handle->publish_feedback(feedback);
+    loop_.sleep_for(100ms);
+  }
+  auto result = std::make_shared<Action::Result>();
+  result->success = true;
+  handle->succeed(result);
+}
+```
+
+示例里的 `sleep_for` 只用于说明状态机，真实控制循环要使用设备反馈和安全 watchdog。用 `ros2 action send_goal -f` 可以看到 feedback，用 `ros2 action list -t` 验证 action 类型。
+
+### 回调线程与任务所有权
+
+长任务不能占满 single-threaded executor，否则同一节点的 cancel、诊断和安全停止回调都无法运行。可把 action 执行放入明确管理的 worker，或用 callback group 与 `MultiThreadedExecutor` 分隔；共享状态要有锁或单线程所有权。析构时先阻止新 goal，再取消/等待 worker，最后销毁 publisher 和 action server，避免 lambda 捕获已经释放的 `this`。
+
+### 常见失败的定位顺序
+
+客户端超时先查 action 名称、接口类型和 server 是否存在；goal 被接受但没有 feedback，查 executor 是否被阻塞；cancel 无效，查执行循环是否检查取消标志；结果重复回调，查重试策略是否把同一 goal 当新任务。对机械臂或移动底盘测试时只使用仿真和限速台架，记录 goal id、状态转换、feedback 时间戳和最终原因。
+
+### 常见错误与调试路径
+
+service 回调迟迟不返回，检查是否把硬件等待或导航循环塞进了 single-threaded executor；action 取消后仍输出控制命令，检查取消分支是否先停止执行器并发布安全状态；客户端重复发送 goal，检查重试是否保留旧 goal id。用 `ros2 service list`、`ros2 action list -t`、服务调用结果和 action feedback 逐层确认接口，而不是只看进程仍在运行。
+
+<SolutionReveal>
+  <p>Service 和 action 的选择首先是时间和恢复语义的选择，API 名称只是结果。下一节会把参数、launch 和生命周期接到这些可装配节点上。</p>
+</SolutionReveal>

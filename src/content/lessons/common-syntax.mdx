@@ -1,0 +1,86 @@
+---
+id: common-syntax
+slug: syntax-control-flow-and-expressions
+title: "控制流与表达式：同一个逻辑的三种写法"
+summary: "把条件、循环和短路表达式从 JS/TS 翻译成 Python 与 C++ 的清晰写法。"
+track: common
+order: 8
+durationMinutes: 12
+concepts: [syntax, control flow, expressions]
+prerequisites: [common-cli]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 控制流与表达式：同一个逻辑的三种写法
+
+JS/TS 的条件表达式、短路求值和数组遍历都很熟悉，但 Python 更强调可读的缩进，C++ 更强调表达式类型和边界。迁移时先保留意图，再选择目标语言最自然的写法。不要把 `&&`、`||` 或三元表达式机械搬过去：Python 的真值规则不同，C++ 还可能发生有符号/无符号比较、隐式转换和越界问题。
+
+面对同一个“筛选启用用户”的需求，三种写法都能工作，但可维护性取决于数据流是否明显。AI 数据处理经常把一串过滤条件写在一行，机器人回调则更需要在截止时间内快速看懂每个分支。先写普通版本验证行为，再在测试保护下压缩表达式。
+
+### 不要先追求语法一模一样
+
+下面这段代码只保留同一个意图，重点观察输入边界、数据流和失败语义，而不是逐字符翻译。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const active = users.filter(user => user.enabled);
+const names = active.map(user => user.name);`}
+  targetLabel="Python / C++"
+  targetLanguage="text"
+  target={`# Python
+names = [user.name for user in users if user.enabled]
+
+// C++
+std::vector<std::string> names;
+for (const auto& user : users) {
+  if (user.enabled) names.push_back(user.name);
+}`}
+/>
+
+### 条件、循环与短路
+
+Python 用缩进表达块，`and/or` 返回操作数而不一定返回布尔值；C++ 的 `&&/||` 进行短路，但条件中的类型转换可能隐藏问题。短路适合默认值或守卫条件，不应把写文件、更新共享状态等副作用塞进表达式。循环要明确空集合和提前 `return` 的语义，避免从 JS 的回调链迁移出一个难以设置断点的长表达式。
+
+```cpp
+std::vector<std::string> enabled_names(const std::vector<User>& users) {
+  std::vector<std::string> names;
+  for (const User& user : users) {
+    if (!user.enabled) continue;
+    if (user.name.empty()) continue;
+    names.push_back(user.name);
+  }
+  return names;
+}
+```
+
+### 明确转换和边界
+
+JS 中 `0`、`""`、`null` 和 `undefined` 的组合常被短路表达式处理；Python 的 `None` 与空容器需要分别理解；C++ 的 `bool` 转换更容易把整数误当标志。跨语言接口收到数值时，先解析成目标类型并检查有限性，再参与比较。对索引、长度和时间戳写出单位，尤其不要把负值转换成无符号整数后得到一个巨大长度。
+
+### 常见错误与排错思路
+
+常见错误是把 JS 的 `value || default` 迁到 Python，结果合法的 `0` 被错误替换；C++ 则常见 `size_t` 与 `int` 比较导致边界判断失效。排错时为零、空字符串、None/null、负数和最大值各写一个表格，逐个运行；如果分支多，给每个分支命名并打印输入摘要，先确认条件判断，再检查后续副作用。
+
+<KeyIdea title="不要先追求语法一模一样">
+  <p>迁移控制流的关键是保持分支和数据流可读。简短不等于更好，尤其在 AI 数据处理和机器人回调中；先验证边界，再选择推导式或 STL 算法。</p>
+</KeyIdea>
+
+## 迁移练习
+
+请完成：把一组用户筛选成启用用户的名称，跳过空名称，并明确空列表、全禁用和包含非字符串名称时的结果。
+
+<Exercise
+  title="控制流与表达式：同一个逻辑的三种写法练习"
+  prompt="把一组用户筛选成启用用户的名称，跳过空名称，并明确空列表、全禁用和包含非字符串名称时的结果。"
+  hint="先写一个普通循环版本，再决定是否使用推导式或 STL 算法；输入类型错误要在边界报告。"
+  solution={`Python 可写 [u.name for u in users if u.enabled and u.name]，但先校验 name 是字符串；C++ 用 range-for 和 !empty() 后 push_back。空列表和全禁用都返回空 vector/list，非法字段返回校验错误。`}
+/>
+
+<SolutionReveal>
+  <p>迁移控制流的关键是保持分支和数据流可读。简短不等于更好，尤其在 AI 数据处理和机器人回调中；让边界测试先固定行为，语法优化才安全。</p>
+</SolutionReveal>

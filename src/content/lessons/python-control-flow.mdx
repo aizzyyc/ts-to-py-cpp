@@ -1,0 +1,227 @@
+---
+id: python-control-flow
+slug: control-flow-and-comprehensions
+title: "控制流、推导式与可读性"
+summary: "把 JS/TS 的条件、循环和数组链改写成 Python 的清晰表达。"
+track: python
+order: 2
+durationMinutes: 12
+concepts: [control flow, comprehensions, readability]
+prerequisites: [python-syntax]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+完成本节后，你应该能用 Python 的 `if`、`for`、`while` 写出可读的数据处理分支；能解释 truthiness 为什么会把 `0` 和 `None` 混在一起；能正确使用 `enumerate`、`zip`、列表/集合/字典推导式；能在固定的事件形状上用 `match`，并用输入、输出和计数定位过滤错误。
+
+## 从 JS/TS 迁移的心智模型
+
+JavaScript/TypeScript 里的 `if`、`for`、`switch` 和数组的 `map/filter` 仍然能帮助你理解 Python，但不能直接照搬。Python 的 `for` 不是只接受数字索引，它会向对象请求 iterable；列表、字典、文件和生成器都能被遍历。Python 也会把空字符串、空列表、空字典、空集合、数字 `0` 和 `None` 判断为假。它们在业务上可能分别表示“用户没有填写”“这一批为空”“测量值恰好为零”和“字段缺失”，所以真值判断是语法规则，不是数据质量规则。
+
+Python 用缩进结束分支，`elif` 对应一串互斥条件，`else` 处理剩余情况。比较值通常使用 `==`，缺失值使用 `is None`；不要把 TypeScript 的 `===` 原样写成 Python。`and` 和 `or` 返回某个操作数，而不保证返回 `bool`，这让它们可以写默认值，也让隐藏的类型错误更容易发生。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const ready = jobs
+  .filter((job) => job.status === "ready")
+  .map((job) => job.id);`}
+  targetLabel="Python"
+  targetLanguage="python"
+  target={`ready_ids = [
+    job["id"]
+    for job in jobs
+    if job.get("status") == "ready"
+]`}
+/>
+
+### if、elif 与显式边界
+
+先问“这个字段不存在时应该怎么办”，再写条件。下面把模型置信度分成三种状态：高于阈值的样本进入发布队列，低于较低阈值的样本进入人工复核，中间区域不应被伪装成确定答案。注意 `probability=0.0` 是合法测量值，因此这里用 `is None` 检查缺失。
+
+```python
+def decide(probability: float | None) -> str:
+    if probability is None:
+        return "missing"
+    if probability >= 0.8:
+        return "publish"
+    elif probability < 0.3:
+        return "review"
+    return "uncertain"
+
+for value in [0.0, 0.5, 0.9, None]:
+    print(value, "->", decide(value))
+```
+
+输出：
+
+```text
+0.0 -> review
+0.5 -> uncertain
+0.9 -> publish
+None -> missing
+```
+
+### for、enumerate 与 zip
+
+普通循环是学习和排错的首选。`enumerate(rows, start=1)` 在遍历时提供人类可读的行号，不需要像 JavaScript 那样维护 `index`；`zip(features, labels)` 逐项配对，但默认在较短序列结束时停止。如果特征和标签长度必须相等，要在 `zip` 之前主动验证，否则最后几条数据会被静默截掉。`range(3)` 产生 `0、1、2`，右端点不包含，和 JS 中 `i < 3` 的习惯一致。
+
+### 示例一：带行号的清洗与配对
+
+这里把事件中的数值转为模型需要的 `float`，同时保留原始行号。`continue` 表示当前事件不合格但后续事件还要处理；`break` 则会提前结束整个循环，二者不要混淆。
+
+```python
+events = [
+    {"id": "a", "value": 0},
+    {"id": "b", "value": "bad"},
+    {"id": "c", "value": 2.5},
+]
+labels = ["zero", "two-point-five"]
+valid = []
+
+for row_number, event in enumerate(events, start=1):
+    try:
+        value = float(event["value"])
+    except (KeyError, TypeError, ValueError):
+        print("skip row", row_number)
+        continue
+    valid.append({"id": event["id"], "feature": value})
+
+if len(valid) != len(labels):
+    raise ValueError("features and labels must have equal length")
+pairs = list(zip(valid, labels))
+print(pairs)
+```
+
+运行到这里会先输出 `skip row 2`，随后因为有效事件只有两条、标签也有两项而成功配对。若把 `labels` 改为三个元素，程序会在配对前抛错，这就是数据契约被明确验证，而不是得到一个看似成功的短列表。
+
+### while、重试和终止条件
+
+`while` 适合“条件仍成立就继续”，例如服务暂时不可用时进行有限重试。Python 不会替你保证循环最终结束；每轮都要让状态向终止条件靠近，并设置上限。相比复制 JavaScript 的 `while (true)`，教学和生产代码都更适合写出明确的 `attempt < max_attempts`。
+
+```python
+responses = ["timeout", "timeout", "ok"]
+attempt = 0
+max_attempts = 3
+
+while attempt < max_attempts:
+    response = responses[attempt]
+    attempt += 1
+    print("attempt", attempt, response)
+    if response == "ok":
+        break
+else:
+    print("move job to retry queue")
+```
+
+这里的 `else` 属于 `while`，只有循环没有被 `break` 打断时才执行。输出第三次出现 `ok` 后不会进入重试队列；如果输入全部是 `timeout`，才会打印转入重试队列。
+
+### 推导式：把短循环压缩成一个结果
+
+列表推导式适合“一层遍历、一个过滤条件、一个结果表达式”。集合推导式适合去重，字典推导式适合建立 id 索引。推导式不应承载网络请求、文件写入或复杂异常处理；有副作用或多层分支时，普通循环更容易插入日志和断点。条件表达式 `"positive" if score >= 0.5 else "negative"` 类似 JS/TS 三元表达式，但不要嵌套到读者无法追踪。
+
+### 示例二：为模型批次建立标签和索引
+
+```python
+scores = [0.2, 0.5, 0.9]
+labels = ["positive" if score >= 0.5 else "negative" for score in scores]
+positive_scores = {score for score in scores if score >= 0.5}
+by_position = {index: score for index, score in enumerate(scores)}
+
+print(labels)
+print(sorted(positive_scores))
+print(by_position)
+```
+
+结果：
+
+```text
+['negative', 'positive', 'positive']
+[0.5, 0.9]
+{0: 0.2, 1: 0.5, 2: 0.9}
+```
+
+### match：按结构分派事件
+
+Python 3.10 的 `match` 可以按值和字典结构分支。它比一长串 `if/elif` 更适合固定事件协议，但不是所有 `switch` 都需要升级成 `match`；简单的字典查表可能更清楚。模式从上到下尝试，通配模式 `_` 放在最后，否则后面的分支永远不会运行。
+
+```python
+def route(job: dict[str, object]) -> str:
+    match job:
+        case {"status": "ready", "priority": priority} if priority >= 2:
+            return "fast-lane"
+        case {"status": "ready"}:
+            return "normal-lane"
+        case {"status": "retry"}:
+            return "retry-lane"
+        case _:
+            return "dead-letter"
+
+for job in [
+    {"status": "ready", "priority": 3},
+    {"status": "ready", "priority": 1},
+    {"status": "unknown"},
+]:
+    print(route(job))
+```
+
+输出为 `fast-lane`、`normal-lane`、`dead-letter`。真实接口中还应校验 `priority` 的类型；结构匹配负责分派，不会自动把 JSON 字符串转换成数字。
+
+## 运行验证：记录每个分支的结果
+
+运行一个控制流脚本时，至少准备一个空输入、一个有效的零值、一个缺字段或坏类型、一个触发重试的输入。先打印输入总数，再为每个淘汰原因累加计数，最后同时打印输出数量。若结果比预期少，按“解析失败 → 条件失败 → 长度配对”顺序缩小范围；不要只打印最终列表，因为最终列表无法说明哪条规则丢掉了数据。可以用 `python control_flow_demo.py` 执行完整脚本，用 `python -m pytest` 在后续课程里固定这些结果。
+
+## 常见错误与排错路径
+
+- 把 `if score` 当成“字段存在”：`0` 会被当成假。用 `score is not None` 表达存在，再单独检查数值范围。
+- 用 `payload.get("name") or "anonymous"` 默认值：这会把空字符串也替换掉。先决定空字符串是缺失还是非法，再写条件。
+- 边遍历边 `remove`：列表长度改变会跳过相邻元素。构造新列表，或先收集要删除的索引并倒序处理。
+- 依赖 `zip` 自动配对：它按短序列结束，先比较长度并在错误中写出两个长度。
+- `while` 不退出：打印每轮的计数和状态，检查计数是否递增、重试上限是否存在。
+- `match` 分支顺序不对：把最具体的字典模式放前面，把 `_` 放最后，并为未知状态保留可定位的 id。
+- `and/or` 得到的不是布尔值：在排错时打印表达式的 `repr` 和 `type`，确认得到的是原字符串、零还是 `True/False`。
+
+## 练习：按状态分桶并保留错误上下文
+
+实现 `bucket_jobs(jobs)`，把推理任务分到 `ready`、`retry`、`dead` 三组，返回每组的任务 ID。未知状态不能静默归入 `ready`，应立即抛出 `ValueError`，错误信息包含 `job_id`。请验证合法任务、空输入和未知状态三种输入。
+
+<KeyIdea title="先让数据流可读，再让表达式短">
+  <p>推导式是普通循环的压缩形式，不是新的业务层。先能定位哪一行样本被过滤，再决定是否压缩；AI 数据管线需要解释每个分支留下或拒绝了什么。</p>
+</KeyIdea>
+
+### 提示
+
+先创建三个空列表组成的结果字典，再用 `for` 逐项读取 `status`。不要修改输入列表，也不要在异常发生前丢失任务 ID。状态集合固定时，`match` 或 `if status not in result` 都可以，但未知状态必须有明确结果。
+
+### 完整答案
+
+<Exercise
+  title="控制流、推导式与可读性练习"
+  prompt="实现 bucket_jobs(jobs)，返回包含 ready、retry、dead 三个键的字典；未知 status 立即 raise ValueError，并在错误信息中包含 job_id。"
+  hint="先建立 result 字典，再用 for 遍历；不要用 jobs.remove。"
+  solution={`def bucket_jobs(jobs):
+    result = {"ready": [], "retry": [], "dead": []}
+    for job in jobs:
+        status = job.get("status")
+        if status not in result:
+            raise ValueError(f"unknown status for job {job.get('job_id')}")
+        result[status].append(job["job_id"])
+    return result`}
+/>
+
+<SolutionReveal>
+  <p>空输入应返回三个空列表；合法输入应保持每组出现顺序；未知状态应保留任务 ID 并失败。把这三个结果写成测试，下一步接入 NumPy 或模型服务时，控制流的行为就有可回归的证据。</p>
+</SolutionReveal>
+
+## 与后续 AI 数据工程的连接
+
+数据准备不是把所有记录“尽量留下”，而是用可解释的分支决定哪些样本进入训练、重试队列或 dead-letter 区。`enumerate` 提供行号，`zip` 检查特征与标签的一一对应，推导式适合构造小结果，`match` 适合分派已知事件协议。后续 pandas、NumPy 和模型服务仍然需要这些普通 Python 控制流来处理异常输入、重试和指标统计。
+
+## 小结
+
+控制流迁移的重点有四个：真值不等于业务有效、循环直接遍历 iterable、`zip` 需要长度契约、短推导式优先于复杂压缩。每个分支都留下可观察的输入、输出和原因，代码才既简洁又能调试。

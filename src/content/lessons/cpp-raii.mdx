@@ -1,0 +1,153 @@
+---
+id: cpp-raii
+slug: raii-and-smart-pointers
+title: "RAII 与智能指针"
+summary: "理解资源生命周期，避免把 JavaScript 的垃圾回收直觉硬套到 C++。"
+track: cpp
+order: 8
+durationMinutes: 14
+concepts: [raii, ownership, smart pointers]
+prerequisites: [cpp-stl]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+本节结束时，你能解释 RAII 为什么把资源绑定到对象生命周期；能区分 stack object、unique_ptr、shared_ptr 和裸指针的职责；会写一个管理文件或传感器句柄的最小 wrapper，并能通过异常路径、提前 return 和 sanitizer 验证资源不会泄漏或重复释放。
+
+## 垃圾回收与 RAII 的迁移差异
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'try { use(file); } finally { file.close(); }'} targetLabel="C++" targetLanguage="cpp" target={'{ std::ofstream file{"sensor.log"}; use(file); }'} />
+
+JS 的垃圾回收器管理内存，但文件、socket、锁和设备句柄仍需要显式 close 或 finally。C++ 的 RAII 让对象析构函数在离开作用域时释放资源，包括正常结束、提前 return 和异常展开。它不是“手动 delete 的另一种写法”，而是把 cleanup 放到类型设计中。
+
+反例是看到 new 就马上配 delete。只要中途 return 或抛异常，delete 可能被跳过；多个指针还可能重复释放。默认优先局部对象和标准库容器，需要独占动态资源时使用 unique_ptr；只有确实存在共享生命周期时才使用 shared_ptr。裸指针通常只是观察者，不应暗示所有权。
+
+## 示例一：作用域自动清理
+
+~~~cpp
+#include <fstream>
+#include <iostream>
+
+void write_log() {
+  std::ofstream file{"sensor.log"};
+  if (!file) {
+    std::cerr << "cannot open log\n";
+    return;
+  }
+  file << "range=1.2\n";
+}
+
+int main() {
+  write_log();
+  std::cout << "done\n";
+}
+~~~
+
+ofstream 在 write_log 返回时析构并关闭文件，即使函数增加提前 return 也不会忘记释放。运行后检查 sensor.log 内容和程序退出码；不要只看 done，因为写文件可能在打开失败时被跳过。机器人节点可以用同样的模式管理日志文件、串口连接和锁。
+
+## 示例二：unique_ptr 表达独占所有权
+
+~~~cpp
+#include <iostream>
+#include <memory>
+
+struct Sensor {
+  explicit Sensor(int id) : id{id} {
+    std::cout << "open " << id << "\n";
+  }
+  ~Sensor() { std::cout << "close " << id << "\n"; }
+  int id;
+};
+
+int main() {
+  auto sensor = std::make_unique<Sensor>(7);
+  std::cout << sensor->id << "\n";
+}
+~~~
+
+输出顺序是 open 7、7、close 7。make_unique 在异常安全上优于直接 new；unique_ptr 不能复制，只能 move，正是“只有一个释放者”的类型表达。调用 sensor.get() 可以暂时借出裸指针，但借用者不能 delete，也不能活得比 unique_ptr 更久。
+
+## 示例三：shared_ptr 的共享计数
+
+~~~cpp
+#include <iostream>
+#include <memory>
+
+struct Frame { int sequence; };
+
+void inspect(const std::shared_ptr<const Frame>& frame) {
+  if (frame) std::cout << frame->sequence << "\n";
+}
+
+int main() {
+  auto owner = std::make_shared<Frame>(Frame{42});
+  auto observer = owner;
+  inspect(observer);
+  owner.reset();
+  inspect(observer);
+}
+~~~
+
+两次 inspect 都能输出 42，因为 observer 仍持有共享所有权。shared_ptr 带来控制块和原子计数等成本，还可能形成循环引用；它不等于线程安全，也不能保证 Frame 内部不会被并发修改。消息系统中只有多个组件确实需要延长同一帧生命周期时才使用它。
+
+## 自定义 RAII wrapper
+
+~~~cpp
+class DeviceHandle {
+public:
+  explicit DeviceHandle(int handle) : handle_{handle} {}
+  ~DeviceHandle() { close_if_open(); }
+  DeviceHandle(const DeviceHandle&) = delete;
+  DeviceHandle& operator=(const DeviceHandle&) = delete;
+  bool valid() const { return handle_ >= 0; }
+private:
+  void close_if_open() {
+    if (handle_ >= 0) {
+      // 调用真实 SDK 的 close(handle_)
+      handle_ = -1;
+    }
+  }
+  int handle_;
+};
+~~~
+
+构造函数取得资源，析构函数释放资源，复制被禁用以避免两个对象关闭同一句柄。真实项目要把 SDK 的 close 失败记录下来，并定义析构中是否允许抛异常；通常析构不抛异常。资源获取失败应在构造或工厂函数中明确返回，不要创建一个看似可用的半初始化对象。
+
+## 所有权、借用和异常安全
+
+把所有权画成箭头：unique_ptr 从创建者转移给新 owner，裸指针或 const reference 只是短期借用，shared_ptr 让多个 owner 共同持有。函数取得资源后如果下一步抛异常，RAII 对象仍会执行析构；这就是基本异常安全保证的基础。不要把 this 指针放进异步任务而没有保证对象仍活着。
+
+## 编译、运行与排错
+
+使用 c++ -std=c++20 -Wall -Wextra -Wpedantic -fsanitize=address,undefined -g 编译。若 sanitizer 报 leak，沿着资源创建路径检查是否绕过了 wrapper；若 double free，检查是否复制了裸指针或手动 delete 了 unique_ptr.get()；若文件内容为空，检查 stream 状态和 flush/close 的生命周期。调试时在构造和析构打印资源 ID，可以快速验证每个打开是否恰好对应一次关闭。
+
+## 机器人连接：设备句柄和消息生命周期
+
+串口、相机、激光雷达通常都有初始化、停止和释放顺序。把句柄封装成 RAII 类型，可以保证节点在启动失败、收到停止信号或某个阶段抛异常时仍然释放设备。消息帧如果只在一个 callback 中使用，借用即可；如果要进入队列，必须通过值、unique_ptr 或经过设计的 shared_ptr 延长生命周期。资源策略应写在接口上，而不是藏在注释里。
+
+<KeyIdea title="资源拥有者应该由类型表达">
+  <p>局部对象负责作用域资源，unique_ptr 负责独占动态资源，shared_ptr 负责确实共享的生命周期，裸指针只做观察者。RAII 让异常和提前返回也走同一条清理路径。</p>
+</KeyIdea>
+
+## 动手练习
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'const client = new Client(); client.close();'} targetLabel="C++" targetLanguage="cpp" target={'auto client = std::make_unique<Client>();'} />
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'using (lock) { update(); }'} targetLabel="C++" targetLanguage="cpp" target={'std::lock_guard<std::mutex> guard{mutex};'} />
+
+实现一个 FileLog wrapper，构造时打开文件，析构时关闭；禁止复制，允许移动。再写一个函数在写入三行后提前 return，验证文件仍可读取且没有 leak。解释为什么不能把 file.get() 交给另一个函数后由它 delete。
+
+<Exercise title="让设备退出路径自动安全" prompt="设计一个独占拥有 SensorHandle 的类型，列出构造失败、提前 return、异常和正常停止四条路径各由谁负责 close。" hint="先写清 ownership 表格；复制删除，观察函数只接收 const SensorHandle& 或 SensorHandle*，移动时转移 handle。" solution="拥有者在 RAII wrapper 析构时 close；构造失败不产生可用对象；提前 return 和异常展开都会调用析构；观察者不能释放 get() 得到的裸指针。" />
+
+## 小结与下一步
+
+<SolutionReveal>
+  <p>打开答案后，请把示例改成自己的传感器数据，再用编译器、运行输出和边界输入验证，而不是只对照文字。</p>
+</SolutionReveal>
+
+RAII 把“什么时候释放”变成对象生命周期，把异常安全从调用者记忆转为类型保证。下一节会继续研究资源如何在函数返回和容器扩容中移动，理解移动语义为什么能减少大消息复制。

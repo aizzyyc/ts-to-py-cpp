@@ -1,0 +1,202 @@
+---
+id: cpp-types
+slug: types-const-and-value-semantics
+title: "类型、const 与值语义"
+summary: "理解整数、浮点、枚举、const 和值拷贝，为后面的生命周期学习打底。"
+track: cpp
+order: 3
+durationMinutes: 14
+concepts: [types, const, value semantics]
+prerequisites: [cpp-syntax]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+完成本节后，你能区分整数、浮点、布尔、枚举和用户定义类型的用途，使用 auto 但不隐藏关键语义；能解释 const 对对象、指针和引用的影响；能识别整数除法、符号转换、精度损失和不必要拷贝，并为机器人数据写出清楚的值类型。
+
+## 从 TS 的 number 到 C++ 的表示
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'const ratio = valid / total;'} targetLabel="C++" targetLanguage="cpp" target={'const double ratio{static_cast<double>(valid) / total};'} />
+
+TypeScript 的 number 通常对应双精度浮点，但 C++ 不会替你统一所有数字。int 适合计数，double 适合距离和时间，std::size_t 常用于容器下标，float 可能适合大量 GPU 或传感器缓冲。类型影响范围、精度、内存布局和生成的指令，所以不是单纯的 IDE 提示。
+
+反例是把所有值都声明成 double：它无法表达“消息序号不可为负”“状态必须属于有限集合”，也让单位错误更难发现。另一个反例是认为 const 等同于 JS 的 deep freeze；const 只限制通过当前名字进行的修改，内部指针或别名仍需单独设计。
+
+## 示例一：类型选择和 auto
+
+~~~cpp
+#include <cstddef>
+#include <iostream>
+
+int main() {
+  const int retry_limit{3};
+  const std::size_t sample_count{120};
+  const double range_m{1.25};
+  const auto timeout_ms{50};
+  std::cout << retry_limit << " " << sample_count << " "
+            << range_m << " " << timeout_ms << "\n";
+}
+~~~
+
+auto 推导出的 timeout_ms 是 int，因为初始化表达式是整数；它没有让变量变成动态类型。用 c++ -std=c++20 -Wall -Wextra -Wconversion types.cpp -o types 编译，运行时应输出四个值。调试时可以让编译器帮你检查推导，或在关键 API 旁明确写出 std::chrono::milliseconds，不要用名字猜单位。
+
+## 示例二：整数除法、浮点和显式转换
+
+~~~cpp
+#include <iostream>
+
+int main() {
+  const int valid{5};
+  const int total{8};
+  const double ratio{static_cast<double>(valid) / total};
+  const int truncated{valid / total};
+  std::cout << ratio << " " << truncated << "\n";
+}
+~~~
+
+输出是 0.625 0。C++ 先根据操作数类型选择除法，再把结果赋给目标类型；这和 JS 中两个 number 都得到浮点结果不同。static_cast 不是让错误消失，而是把“这里确实要转换”写出来。若把负数转换为无符号类型，结果会绕回很大的正数；若把超范围浮点转整数，结果不可依赖。编译 warning 是提示你补充规则，不是噪音。
+
+## 示例三：const、引用与值语义
+
+~~~cpp
+#include <iostream>
+
+struct Reading {
+  double value_m;
+  bool valid;
+};
+
+void mark_invalid(Reading reading) {
+  reading.valid = false;
+}
+
+void mark_invalid_in_place(Reading& reading) {
+  reading.valid = false;
+}
+
+int main() {
+  Reading reading{1.2, true};
+  mark_invalid(reading);
+  std::cout << reading.valid << "\n";
+  mark_invalid_in_place(reading);
+  std::cout << reading.valid << "\n";
+}
+~~~
+
+输出为 1 再 0：按值传参修改的是副本，引用传参修改的是调用者对象。小结构体按值传递可读且所有权简单，大容器通常用 const T& 只读借用。用 -fsanitize=address,undefined（编译器支持时）运行调试版本，可以帮助发现越界和部分未定义行为，但它不能替你验证单位或业务边界。
+
+## const 的三个位置
+
+const double value 表示值不可重新赋值；const Reading& reading 表示通过引用只读对象；const double* ptr 表示不能通过该指针修改 double，而 double* const ptr 表示指针本身不能改指向。初学时先读成“const 修饰它左边的类型，若左边为空则修饰右边”。API 中使用 const& 是把“我只观察，不接管，不修改”写给调用者和编译器。
+
+## 枚举与单位建模
+
+~~~cpp
+enum class Quality { Good, Stale, Invalid };
+
+struct RangeReading {
+  double meters;
+  Quality quality;
+};
+
+bool usable(const RangeReading& reading) {
+  return reading.quality == Quality::Good
+      && reading.meters >= 0.2
+      && reading.meters <= 5.0;
+}
+~~~
+
+Quality 不会和 int 随意相加，结构体字段也把数值和质量放在一起。进一步的工程可以引入强类型单位，但首要目标是让 meters、seconds 不依赖注释才能被区分。机器人消息中“数值存在”不等于“数值可用”，状态必须一起传递。
+
+## 编译、验证与排错
+
+编译上述程序时开启 -Wall -Wextra -Wconversion -Wsign-conversion，记录每个 warning 的原因。若平均值为 0，优先检查是否做了整数除法；若下标比较出现 signed/unsigned warning，统一索引类型或明确转换；若 const 错误，先判断函数应接受副本、只读引用还是可写引用。不要用 C 风格强制转换掩盖问题，因为它同时允许多种不安全转换且不利于搜索。
+
+## 机器人连接：类型就是运行时契约
+
+控制器看到的 0.0 可能是合法距离、缺失数据或传感器故障。用 Reading、Quality、std::chrono 等类型表达约束，可以在数据进入滤波、规划和执行之前完成校验。对高频消息而言，清楚的值语义还帮助你估计复制成本：小消息可按值传递，大图像缓冲应考虑借用或后续的移动语义。
+
+<KeyIdea title="类型不是装饰，它描述了数据能做什么">
+  <p>选择 int、double、enum class、const 引用或值传递时，你同时选择了范围、可变性、所有权和拷贝成本。让类型承载假设，后面的机器人代码才有可验证的边界。</p>
+</KeyIdea>
+
+## 动手练习
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'type Quality = "good" | "stale";'} targetLabel="C++" targetLanguage="cpp" target={'enum class Quality { Good, Stale };'} />
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'function observe(value: Readonly<Reading>) {}'} targetLabel="C++" targetLanguage="cpp" target={'void observe(const Reading& value) {}'} />
+
+定义一个包含 celsius 和 Quality 字段的 TemperatureReading， 实现 average_good_temperature。函数只统计 Quality::Good，空输入返回一个明确的失败结果；用一组包含无效值、负温度和空容器的测试数据验证整数除法、const 引用与状态过滤都正确。
+
+<Exercise title="给传感器读数加上类型语义" prompt="实现一个只读函数，接收 const std::vector<TemperatureReading>&，返回有效样本的平均值，并说明为什么不能只返回 double。" hint="先统计 good_count，再用 0.0 作为累加初值；没有有效样本时不要除以 0，可以返回 std::optional<double>。" solution="使用 const 引用遍历，只累加 Quality::Good；没有有效样本返回 std::nullopt，否则把 sum 除以 static_cast<double>(good_count)。" />
+
+## 延伸实践与验证
+
+
+## 数值范围、溢出与单位
+
+C++ 的整数溢出和无符号转换不能用 JS 的 number 直觉解释。对有符号整数，超过可表示范围可能导致未定义行为；无符号整数会按模回绕，这可能把一个负长度变成巨大的正数。计数、时间戳、距离和角度应该使用能表达其范围与单位的类型，不能只看它们都能打印成数字。
+
+浮点数也有误差。不要用 value == 0.1 作为物理测量的唯一判断，应该设置业务容差，并在日志中保留原始值。NaN 与无穷会传播到后续计算，最终让控制输出变成不可用的数。进入算法前做 isfinite 和范围校验，是类型选择之外仍然必须执行的运行时防线。
+
+## 示例四：把单位和状态封装到消息
+
+~~~cpp
+#include <cmath>
+#include <iostream>
+
+enum class Quality { Good, Stale, Invalid };
+
+struct RangeReading {
+  double meters;
+  Quality quality;
+};
+
+bool usable(const RangeReading& reading) {
+  return reading.quality == Quality::Good
+      && std::isfinite(reading.meters)
+      && reading.meters >= 0.2
+      && reading.meters <= 5.0;
+}
+
+int main() {
+  const RangeReading reading{1.25, Quality::Good};
+  std::cout << (usable(reading) ? "use" : "reject") << "\n";
+}
+~~~
+
+编译运行后应输出 use。把 meters 改为 NaN 或把 quality 改为 Stale，应输出 reject。这个验证说明静态类型和动态校验是两层保护：结构体保证字段存在，函数保证运行时值满足物理条件。后续接入消息系统时，可以把原始消息转换成这个内部类型，再允许算法使用。
+
+## 布局、拷贝和接口稳定性
+
+struct 字段顺序会影响内存布局和对齐。一个包含 bool、double 和整数的结构体不应直接 reinterpret 成跨机器协议，也不能假设不同编译器会产生完全相同的 padding。作为内部消息可以按值复制；作为网络或设备协议必须逐字段序列化并写明宽度、字节序和版本。
+
+函数参数也要表达成本：小型 Reading 可以按值传递，让调用关系简单；大的点云或图像元数据使用 const reference 或 span，避免复制。不要为了理论上的性能把所有参数都改成指针，指针会增加空值和生命周期分支。先测量，再决定是否需要移动或零拷贝。
+
+## 编译器检查和运行时检查
+
+用 Wall、Wextra、Wconversion 和 Wsign-conversion 编译，把每一个 warning 转化成一个决定。若确实需要转换，使用 static_cast 并写明单位或范围理由；若不能证明安全，就修改类型或增加校验。用 sanitizer 可以发现越界、无效移位和部分未定义行为，但 sanitizer 不能知道一个 2.0 是否应该是米还是厘米。
+
+调试数值问题时同时打印输入、转换后值、状态和单位。平均值异常时先查累加初值、整数除法和空输入；随机出现巨大计数时查有符号与无符号混算；模型输入不稳定时查 NaN、精度和归一化范围。这样排错路径会回到数据契约，而不是停留在“打印出来不一样”。
+
+## 机器人连接：消息类型连接硬件和算法
+
+设备 SDK 可能给出原始字节、整数 tick 或 float，规划器却需要米、秒和明确质量。适配层负责转换和校验，算法层接收稳定的 Reading 或消息结构。类型设计越清楚，越容易在没有真实硬件时构造 fake 数据，也越容易在回放中复现一次异常读数。
+
+<KeyIdea title="类型保护边界，运行时校验保护现实">
+  <p>编译器能检查表达式和参数类型，不能检查传感器是否被拔掉、单位是否标错或数值是否为 NaN。把两层检查都放在消息进入算法之前。</p>
+</KeyIdea>
+
+
+<SolutionReveal>
+  <p>打开答案后，请把示例改成自己的传感器数据，再用编译器、运行输出和边界输入验证，而不是只对照文字。</p>
+</SolutionReveal>
+
+## 小结与下一步
+
+  你已经把 JS/TS 的统一 number 直觉拆成了 C++ 的表示、const、枚举和值语义。下一节进入内存层：引用和指针如何借用对象、什么时候会出现悬空引用，以及如何安全地处理传感器缓冲区。

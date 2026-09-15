@@ -1,0 +1,149 @@
+---
+id: cpp-move
+slug: move-semantics-and-ownership-transfer
+title: "移动语义与所有权转移"
+summary: "理解拷贝、移动、右值和资源转移，知道什么时候避免不必要的数据复制。"
+track: cpp
+order: 9
+durationMinutes: 18
+concepts: [move semantics, rvalue, ownership]
+prerequisites: [cpp-raii]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+完成本节后，你能区分 copy、move、lvalue 和 rvalue，理解 std::move 只是一次转换而不是搬运动作；能为拥有 vector 或文件句柄的类型设计移动构造与移动赋值；能验证移动后的对象仍处于有效但未指定状态，并在机器人消息管线中判断何时需要移动、何时按引用借用。
+
+## 从 JS 的对象引用到 C++ 的资源转移
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'const next = current;'} targetLabel="C++" targetLanguage="cpp" target={'Frame next{std::move(current)};'} />
+
+JS/TS 赋值对象变量通常复制引用，真正的内存由 GC 管理；C++ 的 vector、string 和智能指针有明确的资源。按值复制一个 vector 会复制元素，移动则把内部缓冲的所有权交给新对象，通常只需交换指针、大小和容量。这里的“快”不是承诺所有类型都零成本，而是资源拥有权发生了变化。
+
+反例是看到 std::move 就认为源对象消失或一定更快。std::move 只把表达式转换成 xvalue，最终是否移动由目标类型的移动构造、分配器和实现决定。移动后源 vector 仍可析构、clear、重新赋值，但不能依赖它还保存原来的元素。
+
+## 示例一：复制和移动 vector
+
+~~~cpp
+#include <iostream>
+#include <utility>
+#include <vector>
+
+std::vector<double> make_frame() {
+  return {0.8, 1.2, 0.6};
+}
+
+int main() {
+  auto original = make_frame();
+  auto copied = original;
+  auto moved = std::move(original);
+
+  std::cout << copied.size() << " " << moved.size() << "\n";
+  original.clear();
+  std::cout << original.size() << "\n";
+}
+~~~
+
+运行输出为 3 3 0。copied 拥有自己的元素，moved 接管了原来的缓冲，original 在移动后仍可 clear。不能断言 original.size() 在移动后一定是 0；标准只要求它仍然有效，实际状态由实现决定。验证重点是 moved 中的数据完整、original 可安全析构和重新赋值。
+
+## 示例二：返回值与返回值优化
+
+~~~cpp
+struct Frame {
+  std::vector<double> ranges;
+};
+
+Frame read_frame() {
+  Frame frame;
+  frame.ranges.reserve(3);
+  frame.ranges.push_back(0.8);
+  frame.ranges.push_back(1.2);
+  frame.ranges.push_back(0.6);
+  return frame;
+}
+
+int main() {
+  Frame frame = read_frame();
+  std::cout << frame.ranges.size() << "\n";
+}
+~~~
+
+不要为了“避免复制”返回一个局部 Frame 的指针或引用，那会悬空。现代 C++ 通常会进行返回值优化；即使需要移动，Frame 的 vector 也能转移资源。用 -fno-elide-constructors 做教学实验可以观察额外移动，但生产代码应先保持清晰，再用 profiling 证明瓶颈。
+
+## 示例三：为资源类型实现移动
+
+~~~cpp
+class SensorBuffer {
+public:
+  explicit SensorBuffer(std::size_t size)
+      : data_{std::make_unique<double[]>(size)}, size_{size} {}
+
+  SensorBuffer(const SensorBuffer&) = delete;
+  SensorBuffer& operator=(const SensorBuffer&) = delete;
+
+  SensorBuffer(SensorBuffer&& other) noexcept
+      : data_{std::move(other.data_)}, size_{other.size_} {
+    other.size_ = 0;
+  }
+
+  SensorBuffer& operator=(SensorBuffer&& other) noexcept {
+    if (this != &other) {
+      data_ = std::move(other.data_);
+      size_ = other.size_;
+      other.size_ = 0;
+    }
+    return *this;
+  }
+
+  std::size_t size() const { return size_; }
+
+private:
+  std::unique_ptr<double[]> data_;
+  std::size_t size_{0};
+};
+~~~
+
+复制被删除，因为两个对象不能同时释放同一资源；移动构造把 unique_ptr 转移，并把源对象置为一致的空状态。noexcept 很重要：vector 扩容时若移动构造不会抛异常，标准库更愿意使用移动而不是复制。验证时构造两个 buffer，move 后检查新对象 size，旧对象可以析构、重新赋值而不 double free。
+
+## lvalue、rvalue 与 std::move
+
+有名字的变量通常是 lvalue，即使它的类型是 vector；临时对象和显式 std::move 结果可以绑定到右值引用。std::move 不应随意加在仍要使用的数据上，否则你会把资源交给别人后再读取未指定状态。函数若要消费参数，签名应体现这一点，例如 take_frame(Frame frame) 由调用者决定复制或移动，或 take_frame(Frame&& frame) 明确只接收可移动对象。
+
+## 何时移动，何时借用
+
+只读计算使用 const Frame&，不复制也不改变所有权；把帧放进队列通常需要一份 owner，可以传值并让调用者 move；小结构体按值更简单。不要为了减少一次复制，把设备 SDK 仍然拥有的缓冲直接 move 到内部，除非 SDK 明确允许转移。零拷贝方案必须同时说明生命周期、线程和释放函数。
+
+## 编译、运行与排错
+
+使用 c++ -std=c++20 -Wall -Wextra -Wpedantic -Wconversion 编译。若 vector 无法复制，检查是否包含不可复制成员；若 vector 扩容出现性能下降，检查类型是否有 noexcept move；若 moved 数据为空，确认是不是先把同一对象移动了两次；若崩溃，检查移动赋值是否正确处理 self-move 和旧资源释放。调试时记录对象地址、size 和 capacity，但不要把实现细节当成标准保证。
+
+## 机器人连接：消息队列和大帧性能
+
+传感器回调读到的图像或点云可能有数 MB。同步过滤可以用 const reference 借用；跨线程队列需要一条清楚的所有权路径：生产者构造 Frame，move 给队列，消费者取得并处理，最后 RAII 释放。这样既避免不必要复制，又不让消费者访问回调结束后的悬空缓冲。对实时系统还要测量分配、锁等待和尾延迟，而不是只看平均吞吐。
+
+<KeyIdea title="std::move 表示“允许被移动”，不表示“已经移动”">
+  <p>真正的移动发生在被选择的移动构造或移动赋值中。移动后源对象必须可安全销毁和重新赋值，但其元素内容通常不再可依赖。</p>
+</KeyIdea>
+
+## 动手练习
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'const copy = [...frame];'} targetLabel="C++" targetLanguage="cpp" target={'auto copy = frame;'} />
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'queue.push(frame);'} targetLabel="C++" targetLanguage="cpp" target={'queue.push(std::move(frame));'} />
+
+实现一个只拥有 vector of double 的 Message 类型：禁止复制，支持移动；写 enqueue(Message) 和 consume(Message) 两个函数，分别模拟把一帧送入队列与取出处理。打印移动前后 size，并说明为什么不能读取 moved-from 对象的业务数据。
+
+<Exercise title="为大传感器消息画所有权箭头" prompt="设计一条从采样回调到处理队列的移动路径，说明哪里用 const reference、哪里用 std::move，以及移动后每个对象还能做什么。" hint="借用只持续到同步调用结束；跨线程保存必须有 owner；移动后只验证 empty、重新赋值或析构，不读取原始业务内容。" solution="回调构造 Message，队列接口按值接收并由调用者 std::move；消费者获得队列中的 owner；过滤函数只读阶段接收 const Message&，处理完由 RAII 回收资源。" />
+
+## 小结与下一步
+
+<SolutionReveal>
+  <p>打开答案后，请把示例改成自己的传感器数据，再用编译器、运行输出和边界输入验证，而不是只对照文字。</p>
+</SolutionReveal>
+
+移动语义把大对象的资源转移变成类型操作，RAII 保证转移后的对象仍能安全清理。下一节将讨论失败：哪些错误适合异常，哪些错误应返回状态或 optional，以及如何保持对象不变量。

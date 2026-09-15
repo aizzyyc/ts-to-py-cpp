@@ -1,0 +1,40 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import { getCollection } from "astro:content";
+
+const lessons = await getCollection("lessons");
+const searchEntries = lessons.map(({ data, body }) => ({
+  id: data.id,
+  slug: data.slug,
+  title: data.title,
+  summary: data.summary,
+  track: data.track,
+  concepts: data.concepts,
+  content: body ?? "",
+}));
+const searchIndex = JSON.stringify(searchEntries).replace(/</g, "\\u003c");
+---
+
+<BaseLayout title="搜索课程 · LangShift">
+  <section class="search-page">
+    <div class="page-container">
+      <span class="eyebrow">SEARCH THE PATH</span>
+      <h1>找到你现在需要的那一节。</h1>
+      <p class="search-lead">搜索语言、概念、工具链和课程内容。试试：`Promise`、`RAII`、`vector` 或 `数据处理`。</p>
+      <div class="search-box">
+        <form class="course-search-form" data-search-form role="search">
+          <label for="course-search">搜索课程</label>
+          <div class="search-input-row">
+            <input id="course-search" name="q" type="search" placeholder="输入概念、代码术语或课程标题" autocomplete="off" />
+            <button class="button button-dark button-small" type="submit">搜索</button>
+          </div>
+        </form>
+        <p class="search-status" data-search-status aria-live="polite">输入关键词开始搜索。</p>
+        <div class="search-results" data-search-results></div>
+        <noscript><p class="search-fallback">请启用 JavaScript 来使用课程搜索，或者直接从<a href="/learn">学习路线</a>浏览。</p></noscript>
+      </div>
+    </div>
+  </section>
+  <script is:inline type="application/json" id="search-index" set:html={searchIndex}></script>
+  <script src="../scripts/search-client.ts"></script>
+</BaseLayout>

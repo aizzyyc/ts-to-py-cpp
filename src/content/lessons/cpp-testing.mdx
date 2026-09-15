@@ -1,0 +1,154 @@
+---
+id: cpp-testing
+slug: cmake-testing-and-debugging
+title: "CMake 测试与调试"
+summary: "把 C++ 代码拆成可测试目标，并用断点、断言和 Sanitizer 找到内存问题。"
+track: cpp
+order: 16
+durationMinutes: 16
+concepts: [cmake, testing, debugging, sanitizer]
+prerequisites: [cpp-cmake-targets]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## CMake 测试与调试
+
+JS/TS 开发者已经熟悉把纯函数交给 Vitest 或 Jest；C++ 的关键迁移是先把纯逻辑做成 library，再让测试 target 与生产代码共享它。硬件、网络和时钟放在窄适配层，测试可以用内存消息、fake clock 和可控设备替身固定输入。测试的对象不只是返回值，还包括错误、顺序、资源释放和超时。机器人系统要把“能在开发机重复运行”作为硬件联调前的门槛。
+
+### 学习目标
+
+你将学会把传感器规则拆成可测试接口；用 CTest 运行测试；选择断言、日志、调试器和 Sanitizer；为时间、设备和消息队列注入替身；区分单元、集成、回放和真实硬件测试；建立从失败输入到最小复现的调试路径。
+
+### 测试断言就是接口契约
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`test("clamps a value", () => {
+  expect(clamp(12, 0, 10)).toBe(10);
+});`}
+  targetLabel="C++"
+  targetLanguage="cpp"
+  target={`TEST(ClampTest, LimitsUpperBound) {
+  EXPECT_DOUBLE_EQ(clamp(12.0, 0.0, 10.0), 10.0);
+}`}
+/>
+
+浮点数要选合适的近似比较，消息要验证单位和时间戳，空输入要验证安全默认行为。不要在测试中复制一份实现来“计算期望值”，否则实现和测试会一起犯同一个错误。生产函数若依赖系统时间，注入 `Clock&` 或一个可调用对象，测试才能稳定复现截止时间边界。
+
+```cpp
+#include <cassert>
+
+double clamp_range(double value, double low, double high) {
+  assert(low <= high);
+  if (value < low) return low;
+  if (value > high) return high;
+  return value;
+}
+
+int main() {
+  assert(clamp_range(12.0, 0.0, 10.0) == 10.0);
+  assert(clamp_range(-1.0, 0.0, 10.0) == 0.0);
+}
+```
+
+用 `g++ -std=c++20 -g clamp_test.cpp -o clamp_test` 编译并运行。没有输出且返回码为 0 代表断言通过；故意改错边界时，断言会给出失败位置。真实项目可换 GoogleTest/Catch2，但先理解测试输入、契约和失败证据，再选择框架。
+
+### CMake 和 CTest 的最小连接
+
+```cmake
+enable_testing()
+add_executable(filter_test tests/filter_test.cpp)
+target_link_libraries(filter_test PRIVATE sensor_core)
+add_test(NAME filter_range COMMAND filter_test)
+set_tests_properties(filter_range PROPERTIES
+  ENVIRONMENT "ROBOT_CONFIG=test/config.yaml")
+```
+
+使用 `ctest --test-dir build --output-on-failure` 查看失败输出；不要只在 IDE 中点运行，因为 CI 需要同一发现机制。真实设备测试、长时间 rosbag 测试和快速单元测试应分组，命名里写清环境与耗时，避免开发者为了等硬件而跳过所有测试。
+
+### 依赖注入让时间和设备可控
+
+```cpp
+struct Clock {
+  virtual ~Clock() = default;
+  virtual std::int64_t now_ns() const = 0;
+};
+
+bool is_fresh(std::int64_t stamp_ns, const Clock& clock,
+              std::int64_t max_age_ns) {
+  return clock.now_ns() - stamp_ns <= max_age_ns;
+}
+```
+
+测试用 `FakeClock` 返回固定时间，就能稳定覆盖“刚好过期”的边界；生产节点再注入真实的 `steady_clock` 适配器。硬件驱动也可以抽成 `RangeSensor` 接口，测试传入返回错误、空样本或延迟样本的 fake。不要在测试里直接 sleep 等待真实时间，否则在 CI 和机器人负载下会产生脆弱测试。
+
+### 调试要从最小复现开始
+
+先把失败输入缩到一条消息，确认失败稳定，再在边界处观察对象地址、容器大小、线程 ID 和状态转换。GDB/LLDB 断点适合跟踪一次状态改变，断言适合表达不变量，日志应包含序号、frame、阶段和单调时间戳。不要看到崩溃就盲目增加复制或智能指针；先区分生命周期、越界、数据竞争和逻辑断言失败。
+
+### 单元、集成和回放测试的边界
+
+单元测试验证纯转换，例如毫米转米和有效范围判断；集成测试验证节点、队列和文件是否接得上；回放测试把真实传感器记录输入系统，验证消息顺序、延迟和丢包；硬件测试才验证驱动、供电和真实时序。四种测试不能互相冒充：单元全绿不等于 QoS 正确，硬件偶尔成功也不等于错误分支可重复。
+
+### Sanitizer 与编译配置
+
+AddressSanitizer 能抓越界和 use-after-free，UndefinedBehaviorSanitizer 能抓一部分整数溢出、错误转换和未定义操作；它们应配合测试而不是替代测试。调试构建开 `-g -O0` 便于断点，Sanitizer 构建也要保留符号。若测试在 sanitizer 下变慢或某第三方库不兼容，单独隔离 target 并记录原因，不要把整个项目永久关闭检查。
+
+### 可观测失败而不是模糊失败
+
+测试失败应输出输入序号、frame、时间戳、队列深度和期望/实际状态；对浮点数同时打印绝对误差。一个“expected true, got false”无法告诉你是传感器过期、单位错误还是锁竞争。为异步测试保留可控的 stop 信号和超时，超时失败时打印线程状态，而不是无限等待。
+
+### 常见编译、链接和运行时错误
+
+`undefined reference` 先查测试 target 是否链接生产库；`multiple definition` 先查测试辅助函数是否放进头文件且缺少 `inline`。运行时测试找不到配置文件时，检查 CTest 的工作目录和环境变量，而不是修改生产路径。偶发失败先运行同一个用例多次并记录 seed、时间和线程，频率问题可能是竞态而不是随机测试。
+
+### 机器人测试的验收清单
+
+在提交前至少验证：无消息时节点是否安全等待；非法距离是否被拒绝；时间戳倒退是否被记录；队列关闭后线程是否退出；配置文件缺失是否给出非零退出码；回放同一文件是否产生相同统计。把这些条件写成 CTest 名称，之后升级编译器、驱动或 ROS 2 依赖时才有回归证据。
+
+<KeyIdea title="把失败变成可重复的测试输入">
+  <p>一个好的 C++ 测试固定数据、时间和资源边界，并能在命令行和 CI 中重跑。Sanitizer、断言和调试器提供证据，测试矩阵提供回归保障。</p>
+</KeyIdea>
+
+## 迁移练习
+
+为温度过滤器写测试矩阵：0、50、-1、51、NaN 和缺失值；把过滤器放进 `sensor_core`，让 `filter_test` 通过 CTest 运行。再故意制造一次越界或 use-after-free，在 sanitizer 构建中保存完整堆栈，最后修正根因而不是只改断言。
+
+<Exercise
+  title="把传感器规则接入 CTest"
+  prompt="定义至少六个输入/输出断言，并写出 CMake test target；说明你会用断点、日志还是 Sanitizer 处理哪一种失败。"
+  hint="边界值测逻辑，fake clock 测超时，Sanitizer 测内存契约；三者不是互相替代。"
+  solution={`测试应覆盖下限和上限接受、越界拒绝、NaN/缺失拒绝及正常值。filter_test 链接 sensor_core 并用 add_test 注册；断言失败看输入和状态，堆内存错误用 ASan，偶发线程失败则进一步用 TSan 或锁竞争日志定位。`}
+/>
+
+<SolutionReveal>
+  <p>测试目标和生产目标共享实现，才会真正约束机器人代码；稳定复现和工具堆栈则让调试从猜测变成证据。下一节会专门练习 Sanitizer 的定位能力。</p>
+</SolutionReveal>
+
+## 延伸实践：用失败分类决定工具
+
+一个传感器处理器失败时，先给失败建立分类，再选择测试工具。输入 `-1.0` 被接受属于业务规则错误，用参数化单元测试覆盖；队列关闭后线程仍等待属于生命周期错误，用可控的 stop token 和超时测试覆盖；偶发崩溃伴随堆栈污染属于内存错误，用 AddressSanitizer 运行；多个线程同时改计数器属于数据竞争，用 ThreadSanitizer 或锁竞争日志验证。不同问题不能靠增加同一种断言解决。
+
+```cpp
+enum class FailureKind { InvalidInput, Expired, QueueClosed };
+
+std::optional<FailureKind> validate_sample(double range_m,
+                                            std::int64_t age_ns) {
+  if (!std::isfinite(range_m) || range_m < 0.2 || range_m > 5.0) {
+    return FailureKind::InvalidInput;
+  }
+  if (age_ns > 100'000'000) return FailureKind::Expired;
+  return std::nullopt;
+}
+```
+
+用表格列出每种输入、期望的 `FailureKind` 和日志字段，执行 `ctest --test-dir build --output-on-failure`，再把同一组输入交给 rosbag 回放测试。预期是同一文件重复回放得到相同的 accepted、rejected 和 expired 统计；如果结果随运行次数变化，优先检查共享状态、时间来源和线程退出，不要先放宽断言。测试输出应该包含序号、时间戳、frame 和 queue depth，才能把机器人现场问题还原成最小输入。
+
+## 小结补充
+
+JS/TS 开发者熟悉测试函数输入和输出，C++ 还要求把所有权、时间、线程和构建 target 纳入测试边界。完成这一节后，你应能说明一个失败属于逻辑、资源、并发还是环境问题，并用最小、可复现的证据交给下一节的 Sanitizer 和内存调试工具。

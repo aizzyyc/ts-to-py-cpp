@@ -1,0 +1,154 @@
+---
+id: cpp-tracing
+slug: ros2-tracing-and-diagnostics
+title: "ROS 2 Tracing 与系统诊断"
+summary: "通过事件、时间戳和链路诊断节点延迟、丢消息和调度抖动。"
+track: cpp
+order: 35
+durationMinutes: 22
+concepts: [tracing, diagnostics, latency]
+prerequisites: [cpp-ros-simulation]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## ROS 2 Tracing 与系统诊断
+
+Web 性能分析会看 request、queue 和 response 时间；机器人还要把 DDS 传输、executor 调度、回调、算法和输出串成同一条消息旅程。Tracing 记录低开销事件时间线，diagnostics 则向运行者报告当前健康状态。二者互补：trace 解释一次延迟发生在哪，诊断告诉系统现在是否已经 stale、timeout 或 degraded。
+
+## 学习目标
+
+- 能把 JS/TS 的 `performance.now()` 和日志迁移成 ROS 2 消息链路的 trace、diagnostics 与结构化日志。
+- 能区分 DDS、executor、队列、算法和 publish 各阶段的延迟，并使用一致的时间基准。
+- 能用可重复输入输出 p95/p99、丢弃数和 stale 状态，形成可行动的诊断结论。
+
+### 诊断要覆盖消息的完整旅程
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const start = performance.now();
+trace("scan_received", { id, start });
+const output = process(scan);
+trace("scan_done", { id, elapsed: performance.now() - start });`}
+  targetLabel="C++ / ROS 2"
+  targetLanguage="cpp"
+  target={`TRACEPOINT(scan_received, message_id);
+auto start = Clock::now();
+process(scan);
+TRACEPOINT(scan_done, message_id, elapsed_us(start));
+diagnostics_->publish(status);`}
+/>
+
+至少记录 publisher 时间、subscriber 收到、回调开始、入队、worker 开始、处理结束和输出发布；用 message ID 或序号关联跨节点事件。端到端延迟与单节点 callback duration 不同，队列等待和 executor 等待必须单独计算。时间源要统一，跨机器还要考虑时钟同步误差。
+
+### 在 C++ 中保留低开销上下文
+
+```cpp
+struct TraceContext {
+  std::uint64_t message_id{};
+  std::int64_t received_ns{};
+};
+
+void handle(const Scan& scan, TraceContext context) {
+  trace_event("process_begin", context.message_id);
+  const auto output = process(scan);
+  trace_event("process_end", context.message_id,
+              monotonic_now_ns() - context.received_ns);
+  publish(output);
+}
+```
+
+追踪字段应是小整数、时间和状态，不要在高频路径格式化整条点云或同步写文件。生产环境可采样或按问题开启 trace；安全告警和关键诊断不能因为采样被完全丢掉。`diagnostic_msgs` 的 level、name、hardware_id、key/value 要能让人判断动作：healthy、stale、timeout、error 或 degraded。
+
+### 从时间线定位瓶颈
+
+发布到接收变长，查 DDS、网络和 QoS；接收到回调开始变长，查 executor 调度和线程饥饿；回调开始到处理结束变长，查算法、分配和锁；处理结束到输出发布变长，查队列或发布线程。输入年龄高但处理耗时正常，可能是上游速率或队列背压。每个假设都用同一批 bag/场景做前后对比。
+
+### 常见编译、链接、运行时错误
+
+tracepoint 宏未定义，检查 tracing 依赖、生成步骤和编译选项；链接失败看 trace provider 与目标库。运行时没有事件，确认 tracing session、事件名、组件进程和采样过滤；只有诊断没有 trace 时也要核对实际运行的 overlay。诊断一直 healthy 但消息已过期，说明健康阈值用错了时间源或没有更新 last_received；不要用“进程还活着”代替业务健康。
+
+<KeyIdea title="Trace 解释过去，diagnostics 描述现在">
+  <p>用消息 ID 串起发布、传输、排队、处理和输出；用健康级别、阈值和原因告诉运行者下一步。追踪要控制开销，关键告警要保持可见。</p>
+</KeyIdea>
+
+## 迁移练习
+
+为 `/scan` 到 `/cmd_vel` 定义事件点：发布、收到、回调开始、入队、处理开始、处理结束、输出发布。计算端到端、队列等待、处理耗时和输入年龄，并设计 diagnostics 字段区分 healthy、stale、timeout、error。
+
+<Exercise
+  title="把一次延迟尖峰变成时间线"
+  prompt="选择 message_id 与统一时间源，写出 trace 记录和诊断更新；模拟队列堆积，判断延迟变长发生在哪个边界。"
+  hint="至少要有四个时间点；不要把所有耗时都归因于算法；诊断阈值要和数据年龄及 deadline 对齐。"
+  solution={`用 message_id 贯穿发布/接收/回调/输出，end-to-end 为 output_ns - publish_ns，queue wait 为 process_begin - enqueue_ns，processing 为 process_end - process_begin。输入年龄超过阈值报告 stale，deadline 超时报告 timeout，并从 trace 判断 DDS、executor、队列还是算法是瓶颈。`}
+/>
+
+### 诊断输出要能驱动行动
+
+一条诊断应该告诉操作者现在是否可以继续运行，以及下一步应该检查什么。`stale` 表示数据还在到达但年龄超过上限，`timeout` 表示期待的周期没有按时发生，`error` 表示处理失败，`degraded` 表示系统仍提供受限能力。为每种状态定义恢复动作：重启订阅、降低负载、切换备用传感器、停止速度或等待人工确认。仅发布一个整数级别会让仪表盘显示红色，却无法帮助现场工程师复现。
+
+trace 也要避免把 message ID 当成全局唯一的长期数据库主键；在进程重启、bag 回放和多设备部署时，应组合设备名、节点名、序号和采集时间。跨机器延迟分析要标注时钟同步误差，不能把未经校准的 wall clock 差值当作真实网络延迟。采样策略变更后保留配置，才能比较优化前后的 p99。
+
+```text
+ros2 trace start -s scan_latency
+ros2 topic echo /diagnostics
+ros2 trace stop -o trace_scan_latency
+trace-cmd report trace_scan_latency | findstr scan_received
+```
+
+实际命令随 tracing 工具链和平台而异，重点是建立“开始采集、观察健康状态、停止并保存、按事件筛选”的闭环。若 trace 目录为空，先查 session 权限、事件是否注册和目标进程是否在同一环境；若诊断有 timeout 而 trace 没有对应消息，说明事件埋点覆盖不完整，应补上接收或丢弃路径，而不是降低报警阈值。
+
+### 给消息旅程定义可关联的 ID
+
+如果只有“回调耗时 5 ms”，无法知道它对应哪一帧输入。可以在适配器中生成 sequence 或沿用消息序号，在接收、排队、处理开始、发布和丢弃事件中使用同一个字段。时间戳要说明时钟来源：ROS time 用于业务时序，steady clock 用于本机耗时。
+
+```cpp
+const auto receive = std::chrono::steady_clock::now();
+tracepoint(robot, scan_received, msg->header.stamp.sec, sequence);
+auto output = filter(*msg);
+tracepoint(robot, scan_published, sequence,
+           std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::steady_clock::now() - receive).count());
+```
+
+### trace、日志和 diagnostics 各自回答什么
+
+日志适合解释一次异常并保留上下文，trace 适合测量大量消息的时间线，diagnostics 适合让运行者知道当前是 OK、WARN 还是 ERROR。不要在高频回调里拼接大字符串；日志等级、采样和环形 buffer 应可配置。诊断状态要有 stale 超时，不能只在错误首次出现时发一条信息。
+
+```cpp
+diagnostic_updater::DiagnosticStatusWrapper status;
+status.add("received", received_);
+status.add("dropped", dropped_);
+status.add("age_ms", last_age_ms_);
+status.summary(last_age_ms_ > 100 ? DiagnosticStatus::WARN :
+                                      DiagnosticStatus::OK,
+               last_age_ms_ > 100 ? "sensor data stale" : "healthy");
+```
+
+### 用事件链定位延迟
+
+把链路拆成 DDS receive、executor wait、callback、queue wait、algorithm、publish 五段。若端到端延迟升高但 algorithm 时间稳定，问题在队列或调度；若 callback 时间升高，检查锁、日志、内存分配和模型调用；若只在多线程时出现错误，优先查共享状态和 callback group。`ros2 topic hz` 只能看到频率，不能替代这条时间线。
+
+### 低开销采集和可重复比较
+
+先在短 bag 上开启 trace，记录基线，再改变一个变量：executor 线程数、QoS 深度、intra-process 或模型 batch。报告 p50/p95/p99、丢弃数、CPU、内存和输入消息数量。避免用一次偶然的最快值下结论；同一 bag、同一仿真时间和同一 build 才能比较。
+
+### 诊断工具的排错路径
+
+trace 文件为空先查 tracing session 和进程是否加载 instrumentation；诊断没有更新查 updater timer、executor 和 topic QoS；时间跳变查系统时钟与 ROS clock 是否混用；日志时间和消息 header 不一致时不要直接改 header，而要标注两个时间域。生产环境还要限制 trace 大小、脱敏 payload，并保证故障时诊断发布不会反过来阻塞控制。
+
+### 练习验收输出
+
+给一个“雷达偶发丢帧”的 bag，要求输出每个序号的 received/processed/dropped outcome，计算输入年龄和处理 p95，并指出丢失发生在 publisher、DDS、executor 还是有界队列。参考答案必须包含命令、trace 事件、诊断字段和排除过程，而不是只贴一张截图。
+
+## 小结与下一步
+
+本节建立的是一条可定位的消息证据链：用 sequence 关联同一条数据，用 ROS time 解释业务时序，用 steady clock 测量本机耗时，再用 trace、日志和 diagnostics 分别回答“慢在哪里”“发生了什么”和“当前是否健康”。下一节会把这些指标放进传感器消息处理器，用固定输入、fake clock 和 bag 回放完成一次端到端验收。
+
+<SolutionReveal>
+  <p>Tracing 把延迟变成可关联的事件，diagnostics 把运行状态变成可操作的信号。最后一节会把这些观测点、所有权和消息规则组合成传感器处理项目。</p>
+</SolutionReveal>

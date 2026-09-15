@@ -1,0 +1,128 @@
+---
+id: cpp-functions
+slug: functions-headers-and-linkage
+title: "函数、头文件与链接边界"
+summary: "理解声明、定义、头文件和链接错误，建立 C++ 多文件项目的基础。"
+track: cpp
+order: 5
+durationMinutes: 14
+concepts: [functions, headers, linkage, namespaces]
+prerequisites: [cpp-values]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+完成本节后，你应该能设计一个小模块的函数契约，区分 declaration、definition、header 和 translation unit；会用 const reference、返回值和 namespace 组织代码；能解释 undefined reference、multiple definition 和签名不一致的排错路径，并把传感器解析逻辑拆成可复用的多文件模块。
+
+## 从 TS export 到 C++ header
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'export function usable(reading: Reading): boolean'} targetLabel="C++" targetLanguage="cpp" target={'bool usable(const Reading& reading);'} />
+
+TS 的 export function 同时让类型检查器和运行时模块看到名字；C++ header 通常只暴露声明，definition 放在 cpp 中。调用者 include header 后可以编译，但链接器还要找到实现。不要把所有实现塞进头文件：非 inline 的普通函数若被多个 cpp 展开，可能产生 multiple definition。
+
+函数签名还包含参数类型、const 限定和 namespace。把 void process(Reading) 改成 void process(const Reading&) 不是同一个符号；声明和定义必须一字不差。JS 的参数名称通常不是契约的一部分，而 C++ 的类型和引用类别是。
+
+## 示例一：纯函数和参数契约
+
+~~~cpp
+#include <iostream>
+
+struct Reading {
+  double range_m;
+  bool valid;
+};
+
+bool usable(const Reading& reading) {
+  return reading.valid && reading.range_m >= 0.2
+      && reading.range_m <= 5.0;
+}
+
+int main() {
+  const Reading reading{1.4, true};
+  std::cout << (usable(reading) ? "usable" : "reject") << "\n";
+}
+~~~
+
+用 c++ -std=c++20 -Wall -Wextra functions.cpp -o functions 编译，输入结构固定时应输出 usable。const Reading& 表示函数不复制且不修改输入；如果函数需要保存数据到队列，就不能只借用一个可能很快销毁的对象，应该返回值或明确转移所有权。
+
+## 示例二：header 与 cpp 的边界
+
+~~~cpp
+// range_filter.hpp
+#pragma once
+#include <vector>
+double average_valid(const std::vector<double>& ranges);
+
+// range_filter.cpp
+#include "range_filter.hpp"
+double average_valid(const std::vector<double>& ranges) {
+  double sum{0.0};
+  std::size_t count{0};
+  for (const double value : ranges) {
+    if (value >= 0.2 && value <= 5.0) {
+      sum += value;
+      ++count;
+    }
+  }
+  return count == 0 ? 0.0 : sum / static_cast<double>(count);
+}
+~~~
+
+main.cpp 只 include range_filter.hpp 并调用 average_valid。分别编译 range_filter.cpp 和 main.cpp，最后链接两个 object file；如果只编译 main.cpp，会看到函数已声明却 undefined reference。验证不只看输出，还应测试空 vector、全部无效和混合输入，确认除零和边界规则。
+
+## 示例三：namespace、重载与默认参数
+
+~~~cpp
+namespace lidar {
+struct Reading { double meters; };
+double normalize(Reading reading);
+}
+
+namespace camera {
+struct Reading { int pixels; };
+int normalize(Reading reading);
+}
+~~~
+
+两个 namespace 可以各自拥有 Reading 和 normalize，调用时写 lidar::normalize 或 camera::normalize。重载适合表达同一操作对不同类型的明确变体，但不要用几十个重载模拟动态分派。默认参数放在 header 的声明中，并保持一个来源，否则不同调用者可能得到不同默认值。
+
+## 头文件的 include 规则
+
+使用 pragma once 或 include guard 防止同一 header 被重复展开。头文件应尽量自包含：单独创建一个只 include range_filter.hpp 的最小 cpp，确认它能编译。需要的类型在 header 中直接 include，不要依赖调用者“碰巧先 include 了 vector”。把实现细节放在 cpp，可以减少编译依赖和重新编译范围。
+
+## 编译、链接与调试路径
+
+编译错误常见原因是缺少类型 include、声明和调用参数不匹配、namespace 写错；链接错误要检查定义是否有 internal linkage、cpp 是否进了 CMake target、函数是否被错误地放进了不同 namespace。multiple definition 通常来自 header 中的非 inline 实现或全局变量定义。先看第一条错误，再用 nm 检查符号，最后才修改构建配置。
+
+可以用最小重现隔离问题：只保留 header、一个实现和一个 main；用 c++ -std=c++20 -c 分别生成目标文件，再手动链接。这个过程能把 JS/TS 中的 module resolution 直觉转成可观察的符号检查。
+
+## 机器人连接：回调边界是接口边界
+
+机器人节点会把设备 SDK 的原始数据转换成内部消息，再交给滤波器或规划器。原始数据解析函数应尽量是无副作用、可单元测试的纯函数；与硬件交互的类放在边界层。函数 header 是团队约定，应该写清单位、是否修改输入、线程调用条件和失败语义，而不是只写一个模糊的 double。
+
+<KeyIdea title="声明是契约，定义是能力">
+  <p>header 告诉其他翻译单元“可以怎样调用”，cpp 提供真正实现。声明、定义、调用和 target 必须一致，才能让多文件机器人项目稳定链接。</p>
+</KeyIdea>
+
+## 动手练习
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'export function average(values: number[]): number'} targetLabel="C++" targetLanguage="cpp" target={'double average(const std::vector<double>& values);'} />
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'import { average } from "./filter.js";'} targetLabel="C++" targetLanguage="cpp" target={'#include "range_filter.hpp"'} />
+
+创建 range_filter.hpp、range_filter.cpp 和 main.cpp。实现 average_valid 与 count_invalid 两个函数；main 打印混合数据的统计结果。故意把实现文件从构建命令中删掉，观察链接错误，再故意在 header 中放一个普通函数定义并被两个 cpp include，观察 multiple definition。
+
+<Exercise title="把数据处理拆成可测试模块" prompt="写出一个自包含 header 和对应 cpp，为传感器帧提供平均值与有效数量函数，并列出编译、链接、运行三条验证命令。" hint="header 只放声明和必要 include；定义放 cpp；CMake target 同时列出 main.cpp 与 range_filter.cpp。" solution="main.cpp 与 range_filter.cpp 分别用 -c 编译，最后把两个 .o 传给 c++ 链接；函数接受 const vector<double>&，空输入返回 0 或明确失败。" />
+
+<SolutionReveal>
+  <p>当你能把“声明找不到”“定义没加入 target”和“header 重复定义”分开处理时，就已经掌握了 C++ 模块边界。下一节会在这个边界中选择合适的 STL 容器。</p>
+</SolutionReveal>
+
+## 小结与下一步
+
+函数设计的核心是参数、返回值、可变性、命名空间和链接可见性。下一节将把单个值扩展成 vector、map 和消息集合，学习容器的内存与查找特性如何影响机器人数据管线。

@@ -1,0 +1,202 @@
+---
+id: python-files
+slug: files-http-and-data-pipelines
+title: "文件、HTTP 与数据管线"
+summary: "把 Node.js 脚本迁移成清晰的 Python 数据处理流程。"
+track: python
+order: 7
+durationMinutes: 12
+concepts: [files, http, json, pipelines]
+prerequisites: [python-packaging]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+完成本节后，你应该能用 `pathlib.Path` 组织跨平台路径；能明确 UTF-8 编码并区分文本和字节；能读写 JSON、CSV 和 JSONL；能把 HTTP 响应当成不可信输入，检查超时、状态码和 schema；能把 I/O、纯清洗、统计和安全写出组合成可重放的 AI 数据管线。
+
+## 从 JS/TS 迁移的心智模型
+
+Node.js 常把 `fs.readFile`、`JSON.parse`、`fetch` 和 `writeFile` 放进一个 async 函数；Python 也能把这些动作写在一起，但教材和生产管线更需要清楚的边界。读取器负责把字节变成记录，纯函数负责判断记录是否合格，写出器负责序列化和替换目标。这样同一套清洗逻辑既能接本地文件，也能接 HTTP 下载内容或测试中的内存字符串。
+
+`pathlib.Path` 是路径对象，不是普通字符串；用 `/` 运算符拼接路径，Python 会按平台处理分隔符。文本 I/O 应明确 `encoding="utf-8"`，因为用户文本、中文标签和模型元数据都可能超出 ASCII。JSON 是一次性对象格式，JSONL 是“一行一个 JSON 值”的流式格式；大数据不要为了方便把整个文件塞进内存。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const raw = await fs.readFile(input, "utf8");
+const rows = JSON.parse(raw).map(clean);
+await fs.writeFile(output, JSON.stringify(rows));`}
+  targetLabel="Python"
+  targetLanguage="python"
+  target={`raw = Path(input).read_text(encoding="utf-8")
+rows = [clean(row) for row in json.loads(raw)]
+Path(output).write_text(json.dumps(rows), encoding="utf-8")`}
+/>
+
+### pathlib：让路径成为数据的一部分
+
+用 `Path` 表达输入、输出和临时文件，避免手工混用 Windows 的 `\` 与 POSIX 的 `/`。`Path.exists()` 可以做友好的前置检查，但不要仅靠它判断文件之后一定存在，文件可能在检查和打开之间被删除。输出路径与输入路径相同时要特别小心，先打开写入会截断原始数据。
+
+```python
+import json
+from pathlib import Path
+
+source = Path("data") / "events.json"
+target = source.with_name("events.clean.json")
+payload = [{"text": "你好", "label": "ok"}]
+source.parent.mkdir(parents=True, exist_ok=True)
+source.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+rows = json.loads(source.read_text(encoding="utf-8"))
+target.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+print(target, len(rows))
+```
+
+运行结果是 `data/events.clean.json 1`；文件中的中文仍可读。`ensure_ascii=False` 不是所有系统都必须，但它让 JSONL 和人工抽查更清晰。读取文件时若遇到 `FileNotFoundError`，先打印 `Path.cwd()` 和 `source.resolve()`，确认脚本工作目录，而不是盲目改路径字符串。
+
+### 编码：文本和 bytes 不要混为一谈
+
+`read_text` 返回 `str`，`read_bytes` 返回 `bytes`；HTTP 响应和压缩文件常先是 bytes，解析 JSON 前需要按协议解码。Python 默认编码可能随操作系统和 locale 改变，因此 `open(path)` 不应成为跨平台课程里的最终写法。写出时同样要指定编码，否则中文标签在另一台机器上可能变成乱码。
+
+### 示例一：JSON 与 JSONL 的不同读取策略
+
+小型配置可以一次读取 JSON；样本集更适合逐行读取 JSONL，并在坏行处保留行号。下面的函数每行只构造一条输出记录，返回 `kept` 和 `dropped`，不会因为一条坏记录丢掉整个文件。
+
+```python
+import json
+from pathlib import Path
+
+def prepare_jsonl(source: Path, target: Path, allowed_labels: set[str]) -> dict[str, int]:
+    kept = dropped = 0
+    with source.open(encoding="utf-8") as src, target.open("w", encoding="utf-8") as dst:
+        for line_number, line in enumerate(src, start=1):
+            try:
+                row = json.loads(line)
+                text = row["text"].strip()
+                label = row["label"]
+                if not text or label not in allowed_labels:
+                    raise ValueError("row does not satisfy the data contract")
+                dst.write(json.dumps({"text": text, "label": label}, ensure_ascii=False) + "\n")
+                kept += 1
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                dropped += 1
+                print("drop line", line_number)
+    return {"kept": kept, "dropped": dropped}
+```
+
+输入含一个合法中文行、一个坏 JSON 和一个缺字段行时，输出文件只有合法行，结果类似 `{'kept': 1, 'dropped': 2}`。这比只检查输出文件大小更有用：你知道是输入三行中哪一类被处理了。
+
+### CSV：表头和字符串转换要显式
+
+`csv.DictReader` 会把每个字段先读成字符串，不能因为列名叫 `score` 就假定它已经是浮点数。CSV 也可能包含引号、逗号和换行，手写 `line.split(",")` 会在真实数据中出错。写出时使用 `csv.DictWriter` 并声明字段顺序；如果要给模型用，再单独转换和校验数值。
+
+```python
+import csv
+import io
+
+raw_csv = "id,score\na,0.8\nb,not-a-number\n"
+rows = []
+for row in csv.DictReader(io.StringIO(raw_csv)):
+    try:
+        rows.append({"id": row["id"], "score": float(row["score"])})
+    except (KeyError, TypeError, ValueError):
+        continue
+print(rows)
+```
+
+输出是 `[{'id': 'a', 'score': 0.8}]`。坏数值应该计数或进入隔离文件，而不是悄悄变成零；零可能是有效的模型特征。
+
+### HTTP 输入边界：200 不等于数据正确
+
+HTTP 调用要至少设置超时、检查状态码、限制响应大小并验证 schema。`200 OK` 只说明传输层请求成功，响应仍可能是 HTML、错误 JSON 或缺少模型需要的字段。下面使用标准库展示边界；真实项目也可以使用 `httpx`，但同步脚本用 `Client`、异步服务用 `AsyncClient`，不要混用生命周期。
+
+```python
+import json
+from urllib.request import Request, urlopen
+
+def fetch_prediction(url: str) -> dict[str, object]:
+    request = Request(url, headers={"Accept": "application/json"})
+    with urlopen(request, timeout=5) as response:
+        if response.status != 200:
+            raise RuntimeError(f"prediction service returned {response.status}")
+        payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(payload, dict) or not isinstance(payload.get("label"), str):
+        raise ValueError("prediction response must contain a string label")
+    return payload
+```
+
+这段代码不应在普通测试中直接访问真实 URL；测试可以传入 fake client 或 mock。下载数据时记录 URL、时间、状态和内容哈希，才能知道某次训练输入来自哪份远程内容。上传或写入外部系统还要考虑幂等键，避免脚本重跑生成重复样本。
+
+### 原子写出与失败策略
+
+对重要产物，先写到同一目录的临时文件，成功关闭后再用 `Path.replace` 替换目标；这样进程中断时不容易留下半个 JSON。不要覆盖输入文件，除非调用者明确要求并且已经有备份。坏行可以跳过、写入 dead-letter 文件或让任务整体失败，选择取决于标签价值和下游风险；无论选择什么，都要返回 `kept`、`dropped`、`errors` 等统计。
+
+## 运行验证：从输入字节到输出结果
+
+运行文件管线时按层观察：打印输入路径和字节数，确认解析出的记录数，打印合法/丢弃计数，再读取输出并重新 `json.loads` 验证它可被下游消费。命令可以是 `python files_demo.py`；中文样本应通过 `target.read_text(encoding="utf-8")` 读回。HTTP 测试用 fake 响应覆盖超时、非 200 和 schema 缺字段，不要因为一个端点返回 200 就宣称数据可用。
+
+## 常见错误与排错路径
+
+- `Path` 和字符串直接相加：使用 `Path("data") / name`，遇到路径错先检查 `Path.cwd()`、`resolve()` 和是否调用了错误的模块入口。
+- 输出为空或原文件消失：检查是否以 `"w"` 打开了同一个输入路径；重要产物先写临时文件并替换。
+- 中文乱码：所有文本读写明确 `encoding="utf-8"`，HTTP bytes 按响应协议解码；不要依赖系统默认编码。
+- JSONL 一处坏行导致全任务崩溃：捕获 `JSONDecodeError` 并保存行号、错误类型和计数；若数据不允许丢失则改为失败并保留原文件。
+- `json.dumps` 后中文变成转义序列：确认下游是否允许；人工审查和 JSONL 通常可用 `ensure_ascii=False`。
+- CSV 数字比较异常：`DictReader` 返回字符串，先 `float` 并处理 `ValueError`，不要把空字符串直接当零。
+- HTTP 无限等待：为请求设置 timeout；同时区分网络异常、非 2xx 状态和响应 schema 错误。
+- 输出看似成功但模型失败：分别记录输入记录数、字段集合、特征类型和模型版本，不要只看文件存在。
+
+## 练习：构建 JSONL 清洗阶段
+
+实现 `prepare_jsonl(source, target, allowed_labels)`：逐行解析输入 JSONL，只保留非空 `text` 且 `label` 属于允许集合的记录；输出必须使用 `ensure_ascii=False` 并保留中文；坏 JSON、缺字段和类型错误计入 `dropped`，不能让整条管线失去行号上下文。再思考 source 和 target 相同路径时应该如何保护原始数据。
+
+<KeyIdea title="I/O 负责边界，纯函数负责判断">
+  <p>当文件和网络都被当成不可信输入时，清洗逻辑可以在测试里反复运行，线上失败也能通过统计和原始来源重放。路径、编码、超时和写出方式都是数据契约的一部分。</p>
+</KeyIdea>
+
+### 提示
+
+用 `with` 管理输入和输出文件；用 `enumerate(..., start=1)` 保存行号；把解析、字段访问和标签判断放在 `try` 内。输出路径与输入路径相同应主动拒绝，或使用同目录临时文件完成原子替换。
+
+### 完整答案
+
+<Exercise
+  title="文件、HTTP 与数据管线练习"
+  prompt="为 prepare_jsonl(source, target, allowed_labels) 写出实现：逐行解析、保留合法文本和标签、输出 ensure_ascii=False 的 JSONL，并返回 kept/dropped 两个计数。"
+  hint="用 with 管理两个文件；对 JSONDecodeError、KeyError、TypeError 和 ValueError 统一计为 dropped，并保留行号用于调试。"
+  solution={`import json
+
+def prepare_jsonl(source, target, allowed_labels):
+    if source == target:
+        raise ValueError("source and target must be different")
+    kept = dropped = 0
+    with open(source, encoding="utf-8") as src, open(target, "w", encoding="utf-8") as dst:
+        for line_number, line in enumerate(src, start=1):
+            try:
+                row = json.loads(line)
+                text = row["text"].strip()
+                label = row["label"]
+                if not text or label not in allowed_labels:
+                    raise ValueError(f"invalid row at line {line_number}")
+                dst.write(json.dumps({"text": text, "label": label}, ensure_ascii=False) + "\n")
+                kept += 1
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                dropped += 1
+    return {"kept": kept, "dropped": dropped}`}
+/>
+
+<SolutionReveal>
+  <p>用一个合法行、一个坏 JSON、一个缺字段行和一个中文文本验收，结果应同时证明输出内容和 kept/dropped 统计。再检查 source 与 target 相同时是否拒绝调用；数据管线的安全性经常藏在编码、截断和重跑边界里。</p>
+</SolutionReveal>
+
+## 与后续 AI 数据工程的连接
+
+训练集下载、标注清洗、特征导出和模型服务请求都属于 I/O 边界：文件可重放但可能损坏，HTTP 会变化且可能超时，CSV/JSON 的字段类型也不可信。`pathlib` 让路径跨平台，UTF-8 保留中文，JSONL 支持流式处理，统计和原子写出让产物可观察、可恢复。后续迭代器、数据集和模型服务会直接复用这些边界。
+
+## 小结
+
+文件课程的核心是把不可信输入变成有证据的输出：使用 Path 和明确编码，区分 JSON/JSONL/CSV，检查 HTTP 超时、状态和 schema，记录保留与丢弃，重要输出原子替换。I/O 清晰后，纯清洗逻辑才值得交给模型和服务复用。

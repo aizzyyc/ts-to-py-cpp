@@ -1,0 +1,87 @@
+---
+id: common-security
+slug: input-validation-and-security-boundaries
+title: "输入校验与安全边界"
+summary: "识别不可信输入、命令注入、路径穿越和过度信任类型提示的风险。"
+track: common
+order: 23
+durationMinutes: 16
+concepts: [validation, security, untrusted input]
+prerequisites: [common-observability]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 输入校验与安全边界
+
+TypeScript 类型在运行时会消失，外部 JSON、文件和消息仍然是不可信的。Python 和 C++ 也必须校验边界，尤其是在调用命令、加载模型和读写设备时。安全边界应当跟数据流一起设计：入口限制格式、大小和权限，路径解析后限制根目录，进程调用使用参数数组，日志和错误不泄露秘密。AI 的提示词、模型文件和图片同样是输入，不会因为来自“内部管线”就天然可信。
+
+类型声明只能告诉编译器“代码期望什么”，不能证明网络客户端真的传来了那个类型。安全检查要覆盖注入、路径穿越、资源耗尽和错误回显。先画出不可信字符串到敏感操作的路径，再在最近的边界做校验，并在敏感操作前再次确认权限和资源上限。
+
+### 类型声明不等于可信输入
+
+下面这段代码只保留同一个意图，重点观察输入边界、数据流和失败语义，而不是逐字符翻译。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`function runJob(input: JobInput) {
+  exec("python worker.py " + input.file);
+}`}
+  targetLabel="Python / C++"
+  targetLanguage="text"
+  target={`# Python
+subprocess.run(["python", "worker.py", file_name],
+                 check=True, shell=False)
+
+// C++
+std::vector<std::string> args{"python", "worker.py", file_name};
+process.run(args);`}
+/>
+
+### 命令、路径与资源边界
+
+优先使用参数数组，避免把不可信字符串拼进 shell 命令；路径要解析后确认仍在允许的根目录内；模型、图像和消息输入要限制大小、格式、解码时间和并发数。Python `subprocess.run([...], shell=False)`、Node 的 `spawn(program, args)` 和 C++ 的进程封装都应避免隐式 shell。即便没有命令注入，也要防止大文件、超大 JSON 或恶意压缩包耗尽 CPU 和内存。
+
+```python
+from pathlib import Path
+import subprocess
+
+def run_worker(root: Path, name: str) -> None:
+    path = (root / name).resolve()
+    if root.resolve() not in path.parents:
+        raise ValueError("file is outside the allowed root")
+    if path.stat().st_size > 10_000_000:
+        raise ValueError("file is too large")
+    subprocess.run(["python", "worker.py", str(path)], check=True, shell=False)
+```
+
+### 校验、权限与秘密
+
+校验允许集合比黑名单可靠，扩展名也不能替代内容格式检查。把服务账号权限缩到只读或指定设备，给模型加载和文件写入使用专门目录；secret 只从受控环境读取，不要放在命令行参数、源码或日志里。C++ 还要注意字符串长度、缓冲区边界和整数溢出；Python/JS 要限制解析器的深度和输入体积。
+
+### 常见错误与排错思路
+
+常见错误是认为 TS `JobInput` 已经完成校验，或把 `shell=True`/字符串命令当成方便的默认值。排错时沿 tainted input 到执行器、文件 API 或日志的路径回溯，记录经过了哪些校验和权限检查；对路径穿越测试 `..`、符号链接和绝对路径，对命令测试空格、引号和重定向字符。日志只保留安全摘要，发现凭据泄露时先轮换再分析。
+
+<KeyIdea title="类型声明不等于可信输入">
+  <p>进入 AI 和机器人行业后，数据边界会接触文件、设备和进程，安全习惯必须提前建立；每个敏感操作都要有运行时校验和资源上限。</p>
+</KeyIdea>
+
+## 迁移练习
+
+请完成：审查一个接收文件名并调用外部工具的函数，列出至少三项安全改动，并写出一条路径穿越和一条超大文件测试的预期结果。
+
+<Exercise
+  title="输入校验与安全边界练习"
+  prompt="审查一个接收文件名并调用外部工具的函数，列出至少三项安全改动，并写出一条路径穿越和一条超大文件测试的预期结果。"
+  hint="检查命令执行、路径、大小、权限和错误日志中的原始输入。"
+  solution={`使用 argv/shell=False；resolve 后限制在允许根目录；限制文件大小、格式和执行超时；最小权限运行；日志只记录 file_id 和 error_type。name=../secret.txt 与超出大小上限都应在启动外部工具前拒绝。`}
+/>
+
+<SolutionReveal>
+  <p>进入 AI 和机器人行业后，数据边界会接触文件、设备和进程，安全习惯必须提前建立。完成后，请把校验放在敏感操作之前，并用恶意输入验证拒绝路径确实没有执行外部工具。</p>
+</SolutionReveal>

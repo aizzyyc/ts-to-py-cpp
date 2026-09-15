@@ -1,0 +1,74 @@
+---
+id: common-values
+slug: values-types-and-collections
+title: "值、类型与集合：同一个需求的三种表达"
+summary: "把对象、数组和类型系统的经验迁移到 list、vector、map 和 struct。"
+track: common
+order: 2
+durationMinutes: 10
+concepts: [types, objects, arrays, collections]
+prerequisites: [common-runtime]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 先区分“形状”和“容器”
+
+TypeScript 的 `interface` 或 `type` 主要描述值的形状，JavaScript 的对象仍然可以在运行时增加字段。Python 的 `dict` 是通用映射，读取不存在的键会在运行时失败；C++ 的 `struct` 更像一份编译期可检查的字段契约。迁移一个对象列表时，不要只做语法替换，要先判断数据是临时中间值、外部消息，还是会被多个模块长期消费的模型。
+
+这个判断直接影响错误出现的位置。探索性 Python 脚本可以用字典快速验证想法，模型输入和机器人消息则需要明确单位、缺失值、范围和所有权。C++ 的 `std::vector` 保存连续元素，复制和移动有成本；Python/JS 的集合保存对象引用，表面上的赋值往往不是深拷贝。相同的业务需求，在三个运行时里可能拥有不同的性能与别名风险。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`type Reading = { value: number; unit: string };
+const readings: Reading[] = [{ value: 23, unit: "°C" }];`}
+  targetLabel="Python"
+  targetLanguage="python"
+  target={`readings = [{"value": 23, "unit": "°C"}]
+reading = readings[0]`}
+/>
+
+### 形状、容器和所有权
+
+把 `Reading[]` 迁成 Python 时，可以先用 `list[Reading]` 表示集合，再决定 `Reading` 是字典、`dataclass` 还是验证模型；迁成 C++ 时，`std::vector<Reading>` 说明元素类型固定，但仍需决定函数接收值、`const&` 还是移动值。跨模块接口尽量接收“谁拥有这份数据”清楚的类型，而不是传一个可以任意改写的万能对象。
+
+```python
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class Reading:
+    value: float
+    unit: str
+
+def positive_values(readings: list[Reading]) -> list[float]:
+    return [item.value for item in readings if item.value >= 0]
+```
+
+### JS/TS 经验如何迁移
+
+数组的 `map`、`filter` 很适合表达“生成新集合”，但不要默认 Python 推导式或 C++ 算法也会自动复制全部对象。对大批量图像元数据或点云，先估算元素数量和单个元素大小，再选择批量处理、视图或移动语义。对于从 JSON 进来的数据，类型标注只能帮助编辑器，必须在入口检查 `typeof`、键存在性、数值有限性和单位。
+
+### 常见错误与排错思路
+
+最常见错误是把 `items = readings` 当成拷贝，然后在函数内原地删改，导致调用方状态变化。排错时先打印对象身份/地址、集合长度和修改前后的关键字段；再写一个输入为空、重复引用和非法键的测试。C++ 若出现悬空引用，检查返回局部变量引用或容器扩容后保存的元素地址；Python 若出现 `KeyError`，回到反序列化边界补校验，不要在每个调用点散落默认值。
+
+<KeyIdea title="先问数据是否需要契约">
+  <p>探索性脚本可以从 <code>dict</code> 开始；跨模块、跨线程或要长期维护的数据，应该尽早考虑显式类型、校验和不可变边界。</p>
+</KeyIdea>
+
+## 迁移练习
+
+<Exercise
+  title="把一个对象列表变成可检查的数据"
+  prompt="写出一个 Python 版本，从 readings 中取出所有 value 并过滤掉小于 0 的值；然后说明如何把同一规则表达成 C++ 的 std::vector 循环。至少为缺少 value、字符串数值和空集合各写一个预期结果。"
+  hint="列表推导式可以同时完成遍历和条件过滤；真实项目中先把 dict 转成已验证的 Reading。"
+  solution={`Python 可先校验并构造 Reading，再写 values = [item.value for item in readings if item.value >= 0]；C++ 用 const auto& 遍历 vector，满足条件时 push_back。缺少 value 或非数值输入应在边界返回带字段名的错误。`}
+/>
+
+<SolutionReveal>
+  <p>集合语法只是表面。真正要迁移的是对数据边界的判断：临时脚本追求表达力，工程模块还要追求契约、校验和可观察性；当输入规模增长时，再用测量结果决定复制还是移动。</p>
+</SolutionReveal>

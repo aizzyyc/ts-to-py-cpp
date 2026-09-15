@@ -1,0 +1,89 @@
+---
+id: common-serialization
+slug: serialization-and-versioning
+title: "序列化、二进制与版本兼容"
+summary: "理解 JSON、二进制和消息版本演进，建立跨进程数据的兼容意识。"
+track: common
+order: 19
+durationMinutes: 14
+concepts: [serialization, json, versioning]
+prerequisites: [common-memory]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 序列化、二进制与版本兼容
+
+JS/TS 很容易把对象 `JSON.stringify` 后发送出去，但 Python 和 C++ 消费者可能有不同的整数、空值、时间和精度语义。格式需要版本和兼容策略。序列化是把内存模型变成长期协议：字段名、数字范围、时区、编码、字节序、精度和缺失值都必须被定义。JSON 便于调试，二进制可能节省带宽和 CPU，却会增加 schema 工具与版本排错成本。
+
+跨语言尤其要警惕时间戳和大整数。JavaScript 的安全整数范围有限，Python 整数可以更大，C++ 的 `int64_t` 也不等于任意 JSON number 的精确表示；AI 分数通常可以用明确的小数约束，设备 id 可能应作为字符串传输。不要把“解析成功”当作“协议有效”。
+
+### 数据格式是团队之间的长期协议
+
+下面这段代码只保留同一个意图，重点观察输入边界、数据流和失败语义，而不是逐字符翻译。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const message = JSON.stringify({
+  version: 1, id, score, createdAt: new Date().toISOString()
+});`}
+  targetLabel="Python / C++"
+  targetLanguage="text"
+  target={`# Python
+message = {"version": 1, "id": item_id,
+          "score": score, "created_at": created_at.isoformat()}
+payload = json.dumps(message)
+
+// C++
+Message message{1, id, score, created_at};
+auto payload = encode_json(message);`}
+/>
+
+### JSON 与二进制的取舍
+
+JSON 适合 HTTP、CLI 和早期跨语言协作，字段可读且容易抓包；二进制适合高频传感器、点云和带宽紧张的设备，但需要明确 schema、编码器版本和兼容测试。无论格式是什么，外部字节进入内部模型前都要限大小、校验版本和验证必填字段。把协议转换集中在 adapter，不让业务代码直接依赖 JSON 库的动态对象。
+
+```python
+import json
+
+def decode_event(payload: bytes) -> dict:
+    if len(payload) > 1_000_000:
+        raise ValueError("payload too large")
+    event = json.loads(payload)
+    if event.get("version") not in (1, 2):
+        raise ValueError("unsupported event version")
+    if not isinstance(event.get("timestamp_ms"), int):
+        raise ValueError("timestamp_ms must be an integer")
+    return event
+```
+
+### 版本演进策略
+
+新增可选字段通常比重命名或改变类型更兼容；消费者应忽略它不认识但不影响核心逻辑的字段。新消费者遇到旧消息时提供安全默认值，旧消费者遇到新消息时不能被未知字段击穿。若单位或语义改变，增加新字段或新版本，不要复用同一个字段名表达两种含义。保留生产者和消费者的契约测试，并记录当前 schema 版本。
+
+### 常见错误与排错思路
+
+常见错误是 `null`、缺失和 `0` 被当成同一状态，或把 ISO 时间字符串和本地时间混用。排错时保存脱敏后的 payload、版本、编码器版本和字节长度，使用一份固定 golden message 在 JS、Python、C++ 各解析一次；若数值不同，检查浮点精度、时区和整数安全范围，而不是先怀疑网络。
+
+<KeyIdea title="数据格式是团队之间的长期协议">
+  <p>把数据协议当产品来维护，才能让多语言组件持续演进；兼容性需要版本、默认值和可回放的样例共同保证。</p>
+</KeyIdea>
+
+## 迁移练习
+
+请完成：为传感器消息设计 version、timestamp、unit 和 value 字段，并写出旧消费者遇到新消息、新消费者遇到旧消息时的行为；再选择 JSON 或二进制并说明理由。
+
+<Exercise
+  title="序列化、二进制与版本兼容练习"
+  prompt="为传感器消息设计 version、timestamp、unit 和 value 字段，并写出旧消费者遇到新消息、新消费者遇到旧消息时的行为；再选择 JSON 或二进制并说明理由。"
+  hint="考虑旧消费者遇到新字段，以及新消费者遇到旧消息；对时间单位、数值精度和消息大小写清约束。"
+  solution={`version=1、timestamp_ms 为 UTC epoch 毫秒、unit 为固定枚举、value 为有限 double。新字段提供安全默认值并允许旧消费者忽略；无法安全转换的版本或单位拒绝。先用 JSON 便于跨语言调试，高频或带宽受限后再引入带 schema 的二进制格式。`}
+/>
+
+<SolutionReveal>
+  <p>把数据协议当产品来维护，才能让多语言组件持续演进。完成后，请用固定消息在 JS/TS、Python 和 C++ 之间往返一次，比较字段、时间和数值是否保持一致。</p>
+</SolutionReveal>

@@ -1,0 +1,191 @@
+---
+id: python-packaging
+slug: environments-and-packaging
+title: "虚拟环境与依赖管理"
+summary: "从 node_modules 的经验出发，理解虚拟环境、依赖锁定和可复现运行。"
+track: python
+order: 6
+durationMinutes: 8
+concepts: [venv, dependencies, reproducibility]
+prerequisites: [python-iterators]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+完成本节后，你应该能创建并验证一个 Python `venv`；能解释 `pip`、`requirements.txt` 和 `pyproject.toml` 的职责差异；能理解 `src/` 布局下的 import path 和 `python -m`；能记录解释器、依赖和硬件条件，让 AI 数据准备脚本或模型服务可以在另一台机器上重现。
+
+## 从 JS/TS 迁移的心智模型
+
+Node.js 项目通常把依赖安装到 `node_modules`，用 `package.json` 声明直接依赖，用 lockfile 固定解析结果；Python 没有一个所有工具都强制使用的单一 lockfile。常见组合是：`.venv` 隔离解释器与 site-packages，`pyproject.toml` 声明项目和直接依赖，`requirements.txt` 或某种锁定输出记录部署时要安装的具体版本。它们解决的是不同问题，不能把 `pip freeze` 的偶然快照当成完整的项目设计。
+
+虚拟环境的关键不是激活命令本身，而是“安装、编辑器、测试和运行使用同一个 Python”。Windows PowerShell 的激活脚本是 `.venv\Scripts\Activate.ps1`，macOS/Linux 常用 `source .venv/bin/activate`；即使忘记激活，也可以用 `.venv\Scripts\python.exe -m pip` 明确指定解释器。AI 项目还要把 Python 小版本、操作系统、CPU/GPU 轮子和模型文件版本当成运行边界。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`npm install zod
+npm ci
+node src/prepare.ts`}
+  targetLabel="Python"
+  targetLanguage="python"
+  target={`python -m venv .venv
+.venv\\Scripts\\Activate.ps1
+python -m pip install -e .
+python -m package.prepare`}
+/>
+
+### 创建 venv 并确认解释器
+
+在项目根目录创建环境后，第一条验证命令不是安装包，而是打印当前 Python。这样如果后面出现 `ModuleNotFoundError`，你有一个已知的解释器证据。`.venv/` 应加入 `.gitignore`，环境本身不提交；提交能够重建环境的声明和锁定信息。
+
+```bash
+python -m venv .venv
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+# macOS/Linux
+source .venv/bin/activate
+python -c "import sys; print(sys.executable); print(sys.version)"
+python -m pip --version
+```
+
+在 Windows 运行后，路径应指向项目下的 `.venv\Scripts\python.exe`；`pip --version` 的路径也应属于同一个 `.venv`。如果系统禁止激活脚本，不要为了绕过策略修改系统配置，可以直接运行 `.venv\Scripts\python.exe -m pip`。
+
+### 示例一：安装直接依赖和测试依赖
+
+临时实验可以执行 `python -m pip install numpy`，但项目应把依赖写下来。直接依赖是源码明确 import 的包；测试工具只在测试阶段需要，不应被模型服务的最小镜像自动带上。安装时使用 `python -m pip`，确保包落在当前环境。
+
+```bash
+python -m pip install numpy
+python -m pip install pytest
+python -m pip freeze
+python -c "import numpy; print(numpy.__version__)"
+```
+
+这里的版本输出取决于环境，重点是执行 `import` 验证和 pip 的解释器归属。不要用裸 `pip`、另一个终端的激活状态或 IDE 自己的 Python 来推断当前命令成功。
+
+### pyproject.toml：声明项目意图
+
+`pyproject.toml` 是 TOML 文本，方括号表示表，字符串用引号，数组用方括号。它可以声明构建工具、项目名称、支持的 Python 版本、运行时依赖、可选测试依赖和命令入口。下面是一个最小示意，包名和版本只是教学例子，真正项目应根据实际 import 和部署平台选择。
+
+```toml
+[project]
+name = "ai-prep"
+version = "0.1.0"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "numpy==2.1.3",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest==8.3.3",
+]
+
+[project.scripts]
+prepare-data = "ai_prep.prepare:main"
+```
+
+`dependencies` 表示运行时需要什么，`[test]` 这种可选组表示开发和 CI 需要什么。`requirements.txt` 可以把部署入口写成逐行版本约束，例如 `numpy==2.1.3`；但不要同时维护多份互相矛盾的“真相”。选择一种生成锁定输出的流程，并在评审中检查它确实来自 `pyproject.toml`。
+
+### requirements.txt 与可复现安装
+
+一个只写 `numpy` 的 requirements 文件允许 pip 在不同日期解析到不同版本；一个写 `numpy==2.1.3` 的文件更可重复，但仍可能受 Python、平台和二进制轮子影响。训练项目还要记录 PyTorch 与 CUDA 的匹配关系、系统架构和模型权重哈希。可复现不是“在我的电脑上安装成功”，而是另一位开发者能用同一组输入得到同一组依赖和可解释的失败信息。
+
+```text
+# requirements.txt
+numpy==2.1.3
+pandas==2.2.3
+
+# requirements-test.txt
+pytest==8.3.3
+```
+
+安装时可以按用途选择 `python -m pip install -r requirements.txt` 或额外安装测试文件。生产部署前用干净 venv 验证，不要因为当前机器已有包就省略安装步骤。
+
+### import path、src 布局与可编辑安装
+
+如果项目采用下面的布局，`src/ai_prep/prepare.py` 里的 `from ai_prep.features import clean` 需要解释器认识 `src` 下的包。直接运行 `python src/ai_prep/prepare.py` 依赖脚本目录的偶然路径，和测试、安装后的行为可能不同。更稳定的方式是从项目根目录执行 `python -m ai_prep.prepare`，并先 `python -m pip install -e .` 让当前源码以 editable package 安装。
+
+```text
+project/
+  pyproject.toml
+  requirements.txt
+  src/
+    ai_prep/
+      __init__.py
+      features.py
+      prepare.py
+```
+
+不要为了让 import 通过而在代码里到处 `sys.path.insert(...)`；它可能让本地脚本成功，却让容器、pytest 或模型服务失败。导入问题应通过包布局、安装方式和运行入口解决。
+
+### 开发、CI 与部署的同一条验证链
+
+开发机可以使用 editable install，让源码改动立即被 `python -m` 看到；CI 应从干净环境开始，重新安装依赖并运行测试；部署环境则只安装运行时依赖，但仍使用同一个模块入口。三者不必拥有相同的安装命令，却应该共享同一套版本声明和“解释器在哪里、包从哪里加载、入口能否运行”的检查。更新 `pyproject.toml` 后要重新生成锁定输出并评审差异，不要只在本机手工升级一个包。
+
+```bash
+python -m pip install -e ".[test]"
+python -m pip check
+python -c "import sys; print(sys.executable)"
+python -c "import ai_prep; print(ai_prep.__file__)"
+python -m ai_prep.prepare --input data/events.jsonl
+```
+
+`pip check` 能发现已安装包之间的元数据冲突，但不能证明模型权重、GPU 驱动或输入数据正确；这些仍要单独记录和验证。模型服务启动日志至少应包含 Python 版本、关键依赖版本、模型版本和设备类型，不要打印凭据。若开发机和 CI 的 `ai_prep.__file__` 指向不同位置，先修复导入路径，再讨论业务结果是否变化。
+
+## 运行验证：记录输入、输出和环境
+
+初始化后至少运行四个检查：`python -c "import sys; print(sys.executable)"` 确认解释器，`python -m pip show numpy` 确认安装位置，`python -m ai_prep.prepare --help` 确认模块入口，`python -m pytest` 确认测试也使用同一环境。把 Python 版本、依赖版本、平台和模型版本写到运行结果或日志中；如果输出改变，先比较环境快照，再比较代码和数据。若不能在干净 venv 重建，就不要把实验称为可复现。
+
+## 常见错误与排错路径
+
+- `ModuleNotFoundError`：依次检查 `where python`、`python -m pip --version`、`python -m pip show 包名` 和 `python -c "import sys; print(sys.path)"`，确认安装解释器与运行解释器一致。
+- pip 安装成功但 import 失败：包的发行名和 import 名可能不同，也可能是 IDE 指向另一环境；打印 `module.__file__` 和 `sys.executable`。
+- 激活了环境仍用到系统 Python：不要相信提示符颜色，直接打印 `sys.executable`，必要时使用 `.venv\Scripts\python.exe` 的绝对路径。
+- 从 src 目录直接运行：改用 `python -m package.module` 或 editable install，不要以修改 `sys.path` 作为永久修复。
+- “昨天能跑今天不能”：比较 Python 版本、requirements/锁定输出、操作系统和环境变量；先保留失败证据，不要先删除整个 venv 重装。
+- GPU 或模型包不匹配：记录 CUDA、驱动、框架和权重版本，先运行小型 import/设备检查，再启动长训练。
+- 测试依赖进入生产：把 pytest 放在可选依赖组或单独 requirements 文件，部署命令只安装运行时集合。
+
+## 练习：让数据准备命令可复现
+
+为一个使用 `pandas` 的 `ai_prep` 数据准备包设计最小文件和运行步骤：开发者能创建 venv、安装固定运行依赖、额外安装测试依赖、执行模块入口；部署脚本不能因为方便而安装 pytest。写出 Windows PowerShell 和跨平台都容易理解的验证命令。
+
+<KeyIdea title="可复现首先是解释器和依赖可定位">
+  <p>看到一条 import 并不代表环境正确。记录 Python 版本、直接依赖、锁定依赖、平台和硬件相关包版本，才能让 AI 实验和模型服务的结果可重跑。</p>
+</KeyIdea>
+
+### 提示
+
+先激活 `.venv` 或明确使用它的 Python，再用 `python -m pip`。把 `pandas` 放到运行时依赖，把 pytest 放到 `[test]`；入口用 `python -m ai_prep.prepare`。验证时打印 `sys.executable`，不要只看 shell 提示符。
+
+### 完整答案
+
+<Exercise
+  title="虚拟环境与依赖管理练习"
+  prompt="写出 ai_prep 项目的初始化命令，并设计 pyproject.toml 中的运行时依赖与可选测试依赖；最后用 python -m 运行 prepare 模块。"
+  hint="先创建并确认 .venv，再使用 python -m pip；不要调用系统 pip，也不要用 sys.path 绕过包布局。"
+  solution={`python -m venv .venv
+# Windows PowerShell: .venv\\Scripts\\Activate.ps1
+python -m pip install -e ".[test]"
+python -c "import sys; print(sys.executable)"
+python -m ai_prep.prepare --input data/events.jsonl
+# CI 使用固定 Python 版本和锁定依赖文件安装完全相同的版本`}
+/>
+
+<SolutionReveal>
+  <p>完成后应能证明四件事：包安装在当前 venv，prepare 可以按模块入口运行，测试依赖与运行依赖可以分开，另一份干净环境能按同样声明重建。把这套检查写进 README 或 CI，后续文件、HTTP 和模型服务课程就有稳定地基。</p>
+</SolutionReveal>
+
+## 与后续 AI 数据工程的连接
+
+NumPy、pandas、PyTorch 和推理服务依赖的不只是 import 名称，还包括 Python 版本、二进制轮子、CPU/GPU、模型权重和输入数据版本。`venv` 隔离环境，`pyproject.toml` 表达项目意图，requirements 或锁定输出固定安装结果，`python -m` 统一模块入口。环境信息如果能随数据产物和模型结果一起记录，线上回归才有机会重现。
+
+## 小结
+
+可复现的 Python 项目需要四个相互配合的边界：解释器由 venv 定位，依赖由 pyproject 声明，具体版本由 requirements 或锁定流程固定，代码由包路径和 `python -m` 运行。先验证环境，再相信 import 和模型输出。

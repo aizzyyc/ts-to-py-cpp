@@ -1,0 +1,87 @@
+---
+id: common-http
+slug: http-timeouts-and-retries
+title: "HTTP、超时与重试边界"
+summary: "把 fetch 的使用经验扩展为可取消、有超时、能区分失败类型的服务调用。"
+track: common
+order: 13
+durationMinutes: 16
+concepts: [http, timeouts, retries]
+prerequisites: [common-filesystem]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## HTTP、超时与重试边界
+
+`fetch` 返回 500 时仍然是一个完成的 HTTP 响应；迁移到 Python 或 C++ 后，也必须区分 DNS、连接、超时、HTTP 状态和响应内容错误。一个可靠的服务调用还要声明超时、取消、最大响应体、重试资格和幂等性。网络不是函数调用的透明延伸，远端服务可能已经执行成功而客户端只看到了超时。
+
+### 请求成功不等于业务成功
+
+下面这段代码只保留同一个意图，重点观察输入边界、数据流和失败语义，而不是逐字符翻译。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const response = await fetch(url, { signal: AbortSignal.timeout(3000) });
+if (!response.ok) throw new Error("HTTP " + response.status);
+return await response.json();`}
+  targetLabel="Python / C++"
+  targetLanguage="text"
+  target={`# Python
+response = requests.get(url, timeout=3)
+response.raise_for_status()
+return response.json()
+
+// C++
+auto response = client.get(url, 3s);
+if (!response.ok()) return Error::http(response.status());`}
+/>
+
+### 超时、取消与响应检查
+
+超时是正常控制流的一部分。连接超时、读取超时和整体截止时间可以分别帮助定位 DNS、服务端处理或响应传输问题；目标语言的客户端 API 命名可能不同，但都应统一到自己的 `ServiceError`。收到响应后先检查状态码和 content type，再限制响应大小、解析 JSON 并验证字段。若调用方取消，应该把取消信号传到 HTTP 客户端，避免后台请求继续占用连接。
+
+```python
+def fetch_prediction(client, url: str, payload: dict) -> dict:
+    response = client.post(url, json=payload, timeout=(2, 8))
+    if response.status_code == 429:
+        raise RetryableError("rate limited")
+    if response.status_code >= 500:
+        raise RetryableError(f"service status {response.status_code}")
+    response.raise_for_status()
+    body = response.json()
+    if not isinstance(body.get("label"), str):
+        raise ValueError("response label is missing")
+    return body
+```
+
+### 重试的工程边界
+
+重试只适合幂等操作，且要有次数、总时间和退避上限。指数退避加抖动可以避免大量客户端同时再次冲击服务；对 400、认证失败和 schema 错误重试没有意义。创建订单或发送机器人动作时，要用幂等键或先查询状态，不能因为客户端超时就盲目重复执行。记录请求 id、attempt、耗时、状态和最终错误，才能区分服务慢与客户端过载。
+
+### 常见错误与排错思路
+
+最典型的错误是只捕获 HTTP 500，漏掉 DNS、连接拒绝和 JSON 解析失败；另一个是用 `Promise.all` 同时发出无限请求。排错时先查看请求阶段和超时类型，再核对服务端日志中的 request id，最后比较客户端重试次数与代理层重试次数。若延迟逐次变长，检查是否存在多层重试叠加或没有释放响应体。
+
+<KeyIdea title="请求成功不等于业务成功">
+  <p>服务边界的成熟度，体现在失败时仍然能解释发生了什么，并且不会因为重试制造重复副作用。</p>
+</KeyIdea>
+
+## 迁移练习
+
+请完成：为一个模型服务调用设计三次以内的指数退避重试策略，列出可重试错误、总截止时间、幂等条件和日志字段。
+
+<Exercise
+  title="HTTP、超时与重试边界练习"
+  prompt="为一个模型服务调用设计三次以内的指数退避重试策略，列出可重试错误、总截止时间、幂等条件和日志字段。"
+  hint="先列出可重试状态，再决定每次等待多久；不要重试参数错误或非幂等动作。"
+  solution={`仅对连接失败、超时、429 和临时 5xx 重试三次以内；使用 min(base * 2^attempt + jitter, max_delay)，总时间不超过 deadline。请求必须幂等或带 idempotency_key，日志包含 request_id、attempt、status、elapsed_ms 和 retryable。`}
+/>
+
+<SolutionReveal>
+  <p>服务边界的成熟度，体现在失败时仍然能解释发生了什么。完成后，请用 fake client 覆盖超时、429、500 和非法响应四条路径。</p>
+</SolutionReveal>

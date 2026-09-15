@@ -1,0 +1,150 @@
+---
+id: cpp-ros-simulation
+slug: ros2-simulation-and-test-robots
+title: "ROS 2 仿真与测试机器人"
+summary: "用仿真和固定输入验证节点行为，把硬件依赖降到最低并保留可复现测试。"
+track: cpp
+order: 34
+durationMinutes: 22
+concepts: [simulation, testing, fixtures]
+prerequisites: [cpp-ros-plugins]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## ROS 2 仿真与测试机器人
+
+前端用 mock API 验证交互，机器人可以用仿真器、fixture 和录制消息验证节点。但仿真不是“虚拟硬件已经证明安全”：它能覆盖 topic 契约、算法状态机、碰撞几何和可重复时序，却未必覆盖真实传感器噪声、驱动抖动、网络丢包、马达饱和与急停链路。测试计划要明确仿真覆盖什么、还缺什么。
+
+## 学习目标
+
+- 能把 JS/TS 的 mock API 测试经验迁移到区分 mock、仿真和真实机器人各自覆盖的风险，不把仿真通过误认为实机安全。
+- 能在 C++ 节点中正确处理 `/clock`、消息时间戳、传感器噪声和控制 watchdog。
+- 能用 launch、固定世界和可观测 topic 把一个机器人行为变成可重复测试。
+
+### 从 mock robot 到可重复世界
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const robot = createMockRobot({ position: [0, 0] });
+await controller.driveTo(robot, [1, 0]);
+expect(robot.position).toEqual([1, 0]);`}
+  targetLabel="C++ / ROS 2"
+  targetLanguage="cpp"
+  target={`launch_simulation(world);
+spawn_robot("test_bot");
+run_node_tests({ topics: ["/scan", "/cmd_vel"] });`}
+/>
+
+版本化 world、URDF、传感器参数和 launch，测试才能在不同机器上重现。同一个场景要固定初始姿态、时间源、随机种子和控制器配置；否则“偶发通过”可能只是噪声和调度不同。仿真节点仍需使用真实消息类型、QoS 和 namespace，避免测试只验证了另一套 mock API。
+
+### 场景输入应该像测试夹具
+
+```cpp
+struct ObstacleCase {
+  std::string name;
+  std::vector<float> scan_m;
+  std::chrono::milliseconds age;
+  bool expect_stop;
+};
+
+const ObstacleCase cases[] = {
+  {"clear", {3.0F, 3.0F}, 20ms, false},
+  {"blocked", {0.2F, 0.25F}, 20ms, true},
+  {"stale", {3.0F, 3.0F}, 500ms, true},
+};
+```
+
+固定夹具要覆盖清空、障碍、过期、NaN、无数据和传感器延迟；断言 `/cmd_vel` 的速度边界、停止时刻、diagnostics 状态和恢复动作。测试时可将仿真传感器替换为固定 publisher，但仍应让处理节点看到真实 `LaserScan`/`PointCloud2` 结构。时间依赖用 simulated clock，避免 wall clock 让回归不稳定。
+
+### 分层验证而不是只跑仿真
+
+单元测试验证滤波和安全状态机，节点集成测试验证 topic/QoS/参数，仿真测试验证世界与运动反馈，硬件台架测试验证驱动与急停，实机测试再按风险分级。每层保存日志和 bag；仿真通过后仍要对真实传感器的噪声分布、时延和异常断连做差异分析。不要把真实机器人接入自动测试而没有限速、区域和人工急停。
+
+### 常见编译、链接、运行时错误
+
+仿真包找不到模型或插件，检查 install 资源、`GAZEBO_MODEL_PATH`/对应模拟器路径和 overlay；节点启动却收不到 `/scan`，查 topic 类型、QoS、namespace 与 simulated clock。模型能动但控制器不收敛，先核对单位、坐标轴、轮距和时间步长。仿真过程崩溃时保存 world、参数、随机种子和最后消息，不能只贴“跑挂了”。
+
+<KeyIdea title="仿真要可重复，也要诚实表达盲区">
+  <p>世界、模型、参数、时间和输入夹具共同决定仿真结果；仿真覆盖接口与算法，却不能替代真实噪声、驱动和安全链路验收。</p>
+</KeyIdea>
+
+## 迁移练习
+
+为避障节点写三个仿真场景：前方障碍、传感器延迟、完全无数据；为每个场景定义输入 topic、时间线、QoS、期望 `/cmd_vel` 和诊断。再列出必须在台架或真实机器人上补测的条件。
+
+<Exercise
+  title="把避障行为变成仿真回归"
+  prompt="固定 world/URDF/参数/随机种子，注入清空、障碍、过期和 NaN 输入；断言停止速度、超时状态和恢复动作，并说明仿真与实机的边界。"
+  hint="每个场景写成可重放的消息序列；使用 simulated clock；真实验收要覆盖噪声、驱动延迟、急停和物理限位。"
+  solution={`用固定 launch 启动世界、机器人和节点，以真实 scan 消息注入场景；清空允许正常速度，障碍/过期/无数据进入安全停止并发布诊断。仿真验证状态机与通信，真实台架还需验证传感器噪声、执行器响应、网络和急停。`}
+/>
+
+### 用场景清单复查仿真结论
+
+每个场景都应同时写输入、时间线、输出和停止条件，而不是只保存一张世界截图。比如障碍在第 2 秒出现，控制器应该在一个允许的周期内把速度降到零；传感器延迟 400ms 时，节点应依据消息年龄而不是仿真世界当前姿态判断过期。回归结果还要保存模型版本、参数摘要、QoS 和随机种子，这样“同一场景”才真的可比较。若仿真通过但实机失败，把差异拆成噪声、驱动响应、时钟、网络和物理限制五类，再决定新增 fixture 还是增加台架测试。
+
+```yaml
+name: stale_scan_stops_robot
+world: warehouse-v3
+use_sim_time: true
+input_topic: /scan
+delay_ms: 400
+expected:
+  cmd_vel_linear_x: 0.0
+  diagnostic_level: WARN
+  reason: stale_sensor
+```
+
+这份清单把测试意图从 launch 命令中提取出来，评审者可以先看安全动作，再看具体仿真器参数。运行时如果节点没有输出预期诊断，先检查 simulated clock 是否在推进、消息 QoS 是否匹配、场景是否真的发布了延迟输入；不要仅凭画面上机器人移动就判定控制器正确。
+
+### 仿真时间和传感器时间
+
+仿真器通常通过 `/clock` 推进世界时间；节点设置 `use_sim_time=true` 后，`this->now()` 才与回放或仿真保持一致。传感器消息的 `header.stamp` 表示采样时刻，不能在回调里无条件改成接收时刻，否则同步和 TF 查询会失去意义。执行耗时可以另用 `steady_clock` 测量。
+
+```cpp
+const auto sample_time = msg->header.stamp;
+const auto begin = std::chrono::steady_clock::now();
+process(*msg);
+const auto elapsed = std::chrono::steady_clock::now() - begin;
+RCLCPP_INFO(get_logger(), "sample=%u.%u processing_us=%ld",
+  sample_time.sec, sample_time.nanosec,
+  std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count());
+```
+
+暂停世界时，ROS timer 不应继续把旧控制命令发送给执行器；安全节点还需要 watchdog 检查时钟是否停滞。
+
+### 用 launch 组合可重复实验
+
+把 world、机器人模型、传感器插件、目标节点和参数写入 launch，避免每次手工启动得到不同状态。实验开始时固定随机种子、初始位姿、仿真步长和 QoS，输出目录记录 commit 与配置。
+
+```python
+Node(
+    package="robot_controller",
+    executable="obstacle_stop_node",
+    parameters=[{"use_sim_time": True, "stop_distance_m": 0.45}],
+    remappings=[("/scan", "/sim/laser")],
+)
+```
+
+验证时先运行 `ros2 node list`、`ros2 topic hz /sim/laser` 和 `ros2 topic echo /cmd_vel`，再让障碍物进入安全距离，检查输出是否在规定周期内变为零，而不是只看 RViz 画面。
+
+### 从 mock 到传感器插件
+
+mock 可以快速覆盖状态机边界，仿真传感器可以覆盖消息类型、噪声和坐标系，实机才能覆盖驱动抖动、网络丢包、马达饱和、线缆断开和急停。三层输入都应走相同 ROS 2 topic 契约；不要在仿真专用分支里绕过 QoS、TF 或时间校验。
+
+### 仿真不通过时的排错顺序
+
+先确认 world 和模型加载，再确认 `/clock`、传感器 topic、`frame_id` 和 TF，接着确认控制节点参数与 QoS，最后才看算法。机器人不动可能是控制器未激活、命令 topic 错误或仿真时间未推进；碰撞不生效可能是模型 collision geometry 缺失，不是规划器必然正确。把失败场景保存为固定 launch 和 bag，才能回归。
+
+### 面向真实机器人发布的门槛
+
+仿真通过后，先在无负载、限速、急停可用的台架运行；记录命令频率、传感器 age、TF 延迟、CPU 和温度。把仿真覆盖项与未覆盖项写进报告，尤其是安全停机、执行器错误和通信中断。只有这些证据齐全，才可以扩大速度和环境范围。
+
+<SolutionReveal>
+  <p>仿真课程的成果是可重复的场景夹具和诚实的覆盖边界。下一节会把可替换节点的事件链用 tracing 和 diagnostics 观测出来。</p>
+</SolutionReveal>

@@ -1,0 +1,203 @@
+---
+id: cpp-syntax
+slug: syntax-initialization-and-control-flow
+title: "表达式、初始化与控制流"
+summary: "从 JS/TS 的表达式经验进入 C++ 的初始化、作用域和编译期类型检查。"
+track: cpp
+order: 2
+durationMinutes: 14
+concepts: [syntax, initialization, scope]
+prerequisites: [cpp-toolchain]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 学习目标
+
+本节结束时，你应该能用 C++ 的初始化、表达式、作用域、条件分支和循环写出一个可编译的传感器检查程序；能说明等号、花括号、nullptr 和 const 的语义差异；还能从 warning 和边界条件出发定位控制逻辑中的错误。
+
+## JS/TS 心智模型的迁移与反例
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'const ok = value > 0;'} targetLabel="C++" targetLanguage="cpp" target={'const bool ok{value > 0.0};'} />
+
+JS/TS 允许变量在运行时携带不同类型，C++ 则要求每个对象在编译时确定类型。const value = input 在 TS 中可能仍然是字符串或联合类型，C++ 的 const double value with brace initialization 同时表达了类型、初始化时机和不可重新赋值。迁移时不要把“声明不可重新赋值”误认为“底层对象一定不可变”：C++ 的 const 是类型系统约束，需要通过引用和指针的类型继续传播。
+
+另一个反例是把 if (value) 当成通用真假判断。C++ 虽允许整数转 bool，但传感器的距离、错误码和有效状态最好用不同类型表达，否则 -1 这种错误值会被当成 true。明确类型比复刻 JavaScript 的便利转换更安全。
+
+## 示例一：初始化与缩窄转换
+
+初始化不是赋值。优先使用花括号，可以在编译期阻止把 3.14 悄悄塞进整数。
+
+~~~cpp
+#include <cstdio>
+#include <iostream>
+
+int main() {
+  int sample_count{3};
+  double voltage{12.5};
+  // int bad{3.14}; // 编译器会拒绝缩窄转换
+  sample_count = 4;
+  std::printf("%d samples, %.1f V\n", sample_count, voltage);
+}
+~~~
+
+使用 c++ -std=c++20 -Wall -Wextra syntax.cpp -o syntax 编译，运行后输出 4 samples, 12.5 V。如果把注释去掉，预期编译失败；这不是麻烦，而是把单位或精度错误提前到编译期。auto 可以减少重复类型，但不能替你决定业务语义，传感器单位仍应写在变量名或类型中。
+
+## 示例二：作用域与条件分支
+
+花括号定义可见范围。下面的 safe 只在 if 作用域内有效，避免后面误用一个已经不再代表当前测量的状态。
+
+~~~cpp
+#include <cstdio>
+#include <cmath>
+#include <exception>
+#include <iostream>
+
+int main() {
+  const double range_m{0.85};
+  if (range_m > 0.2 && range_m < 5.0) {
+    const bool safe{true};
+    std::puts(safe ? "safe" : "blocked");
+  } else {
+    std::puts("invalid");
+  }
+}
+~~~
+
+输出应为 safe。注意 && 左侧为 false 时，右侧不会求值，所以判空通常写在解引用之前：if (sensor != nullptr && sensor->ready())。反过来写会先访问空地址，形成未定义行为。编译器能检查很多类型错误，但不能证明你的条件顺序符合业务。
+
+## 示例三：循环和采样窗口
+
+把 TS 中的 for...of 迁移为范围 for，把需要索引的场景保留为经典 for。
+
+~~~cpp
+#include <iostream>
+#include <vector>
+
+int main() {
+  const std::vector<double> ranges{0.8, -1.0, 1.2};
+  int valid_count{0};
+  for (const double range_m : ranges) {
+    if (range_m > 0.0) ++valid_count;
+  }
+  std::printf("%d\n", valid_count);
+}
+~~~
+
+范围 for 会依次复制每个 double，对大对象可以改成 const auto&。经典 for 从索引 0 开始并在 i 小于 ranges.size() 时继续，适用于同时访问相邻样本；索引不应超过容器长度，否则会越过最后一个元素。while 适合采样线程：必须让 running 能被更新，并在等待时休眠或阻塞，否则会持续占满 CPU。
+
+## switch、枚举与可读状态
+
+字符串状态在 JS 中很常见，C++ 可以用 enum class 让状态集合更明确。
+
+~~~cpp
+enum class SensorState { Ready, Stale, Fault };
+
+const char* label(SensorState state) {
+  switch (state) {
+    case SensorState::Ready: return "ready";
+    case SensorState::Stale: return "stale";
+    case SensorState::Fault: return "fault";
+  }
+  return "unknown";
+}
+~~~
+
+enum class 不会自动当成整数参与运算，减少把状态和数组索引混用的机会。每个分支都应覆盖已知状态；如果未来增加枚举值，编译器 warning 可以提醒你重新检查。机器人消息解析时，未知值要走显式的 unknown 或错误路径，不能默认当作安全。
+
+## 编译、运行与验证
+
+把本节示例保存为 syntax.cpp，使用 c++ -std=c++20 -Wall -Wextra -Wpedantic syntax.cpp -o syntax。先验证程序退出码为 0，再验证输出和输入场景：0.85 应为 safe，-1 应为 invalid，空输入或无法转换则应由调用者捕获异常。若出现 expected ';'，看上一行是否漏分号；若出现变量未声明，检查它是否定义在另一个作用域；若出现 warning，不要只加 cast，先解释这个转换为何合理。
+
+## 机器人连接：控制流必须有退出和边界
+
+传感器回调通常在高频循环中运行。一个可靠的循环需要明确采样次数、超时、退出标志和无效数据策略：有效距离进入滤波器，NaN、负数或过期消息进入 fault 分支。不要用 while (true) 掩盖没有停止条件，也不要让 int 与 std::size_t 混合比较造成边界 warning。
+
+<KeyIdea title="让初始化和边界条件成为代码的一部分">
+  <p>花括号初始化、明确的作用域、枚举状态和带上界的循环，会把很多运行时问题提前暴露。C++ 不是把 JS 写得更啰嗦，而是要求你把隐含假设写出来。</p>
+</KeyIdea>
+
+## 动手练习
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'for (const value of values) check(value);'} targetLabel="C++" targetLanguage="cpp" target={'for (const double value : values) check(value);'} />
+
+<CompareCode sourceLabel="JS / TS" sourceLanguage="typescript" source={'if (sensor?.ready) sensor.read();'} targetLabel="C++" targetLanguage="cpp" target={'if (sensor != nullptr && sensor->ready()) sensor->read();'} />
+
+给定四个样本 0.8、-1.0、1.2、6.0，统计有效距离、过近距离和过远距离；用 SensorState 表示最终状态。要求使用范围 for，不修改输入数组，并为边界 0.2、5.0 写出验证样例。
+
+<Exercise title="写一个有边界的采样检查器" prompt="实现 classify_range(range_m)，返回 Ready、Stale 或 Fault，并在 main 中遍历四个样本打印统计结果。解释为什么 -1.0 不能只用 if (range_m) 判断。" hint="先判断 std::isfinite，再判断范围；范围 for 使用 const double，统计变量在循环外初始化为 0。" solution="先排除非有限值和越界值，再返回 SensorState::Ready；统计循环只读取 const 样本，并为 0.2 与 5.0 写边界测试。" />
+
+## 延伸实践与验证
+
+
+## 表达式、短路与求值边界
+
+C++ 的表达式不只是把值算出来，还涉及类型转换、求值顺序和副作用。&& 与 || 具有短路行为，可以把安全前置条件放在左边；逗号运算符、复杂的自增表达式和同时修改同一变量的写法会让阅读与调试变困难。对于控制和传感器代码，宁可拆成几个有名字的布尔变量，也不要把校验、日志和状态更新压成一行。
+
+三元表达式适合选择一个结果，不适合在两个分支中做大量副作用。if 分支中的变量要在同一作用域内使用，循环中的计数要明确从零开始还是从一开始。把隐式转换写成显式判断，可以防止一个负错误码在转换后变成看似合法的状态。
+
+## 示例四：把输入解析和业务判断分开
+
+~~~cpp
+#include <cstdio>
+#include <cmath>
+#include <exception>
+#include <iostream>
+#include <string>
+
+int main() {
+  const std::string text{"1.25"};
+  try {
+    const double range_m{std::stod(text)};
+    const bool finite{std::isfinite(range_m)};
+    const bool in_range{range_m >= 0.2 && range_m <= 5.0};
+    if (finite && in_range) {
+      std::puts("ready");
+    } else {
+      std::puts("fault");
+    }
+  } catch (const std::exception& error) {
+    std::fprintf(stderr, "parse failed: %s\n", error.what());
+  }
+}
+~~~
+
+编译时补上需要的头文件，运行 1.25 应输出 ready；把文本换成 abc，应进入 parse failed。这个例子把“能否转换”和“转换后是否满足物理范围”分成两步，调试日志也更容易说明原因。实际节点可以把解析结果转换成上一节的枚举状态，而不是让异常字符串一路传到控制器。
+
+## 作用域、shadowing 和可读循环
+
+如果内层循环又声明一个同名的 range，外层变量会被 shadow，读者很难知道日志打印的是哪一帧。开启 Wshadow 可以发现这类问题。范围循环适合逐个处理样本，需要位置时使用明确的索引；处理相邻点时说明 i 加一和 i 减一的边界，避免访问负索引或超过最后一个元素。
+
+调试一个不退出的采样循环时，先打印迭代次数、输入时间戳和 running 状态；再检查等待条件是否真的会被唤醒。CPU 占用持续升高通常不是“C++ 很快”，而是循环没有阻塞、休眠或退出路径。用固定样本数做离线验证，再接入真实设备，能把控制流错误与设备时序错误分开。
+
+## 边界测试清单
+
+至少验证空输入、单个输入、恰好等于最小范围、恰好等于最大范围、略小于最小范围、略大于最大范围、NaN、无穷和错误文本。每个测试都写出预期状态和输出，不要只用一个正常数字证明程序正确。测试失败时先判断是解析、比较、循环边界还是输出格式问题。
+
+## 一次小型重构：从脚本循环到可诊断函数
+
+把一段脚本式逻辑迁移到 C++ 时，可以先拆成三个动作：读取一个样本、判断样本、累计统计。每个动作都有自己的输入和输出，出现错误时就能知道是数据不合法、条件写错还是计数没有更新。不要一开始就把设备读取、循环、日志和控制输出放进 main；main 只负责组装，函数负责一个可验证的规则。
+
+例如，先让 classify_range 只接收一个 double 并返回 SensorState，再让 count_ready 接收一段只读样本。使用固定 vector 调用它们，打印 ready、fault 和总数；确认离线结果稳定后，才把同样的函数放进真实采样循环。这样既保留 C++ 的静态类型检查，也保留 JS/TS 开发者熟悉的“小函数加测试输入”工作方式。
+
+## 从编译器反馈建立学习闭环
+
+每次改写一个语法点，都应留下一个可以重复的反馈闭环：先编译，查看 warning；再运行正常输入，核对输出；最后运行边界输入，确认失败路径。比如把距离阈值从单行条件拆成命名布尔值后，可以分别打印 finite、in_range 和最终状态。这样当结果不对时，你能知道是浮点输入、范围比较还是状态分支出了问题。
+
+在真实项目中，编译器只负责静态部分，日志和测试负责运行时部分。把一个传感器回调改成 while 循环前，先用固定样本模拟三次循环，验证计数、退出标志和最后一次输出；再接入设备。这个顺序能避免把“循环写错”“设备没有消息”“线程没有唤醒”混成同一个问题。对 JS/TS 开发者来说，这相当于把快速脚本迭代补上了 C++ 的编译期契约和系统级可观测性。
+
+<KeyIdea title="把每一个隐式假设拆成可观察的分支">
+  <p>初始化、作用域、短路和循环边界共同决定传感器逻辑是否可靠。短一点的代码不一定更清晰，能打印、能测试、能解释的代码才适合系统工程。</p>
+</KeyIdea>
+
+
+<SolutionReveal>
+  <p>打开答案后，请把示例改成自己的传感器数据，再用编译器、运行输出和边界输入验证，而不是只对照文字。</p>
+</SolutionReveal>
+
+## 小结与下一步
+
+  本节建立了 C++ 的表达式、初始化、作用域、条件和循环模型。下一节将进一步讨论类型、const 和值语义：同一个变量为什么会复制，什么时候转换会损失信息，以及这些选择如何影响传感器数据的可靠性。

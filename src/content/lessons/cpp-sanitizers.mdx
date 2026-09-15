@@ -1,0 +1,145 @@
+---
+id: cpp-sanitizers
+slug: sanitizers-and-memory-debugging
+title: "Sanitizer 与内存调试"
+summary: "用 AddressSanitizer、UndefinedBehaviorSanitizer 和断言定位 C++ 隐蔽错误。"
+track: cpp
+order: 17
+durationMinutes: 18
+concepts: [sanitizer, undefined behavior, debugging]
+prerequisites: [cpp-testing]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## Sanitizer 与内存调试
+
+JavaScript 数组越界通常得到 `undefined` 或由运行时抛错；C++ 的 `operator[]` 越界、use-after-free、整数溢出和对齐错误可能暂时“看起来能跑”。Sanitizer 在运行时给对象周围加护栏、记录来源和堆栈，把偶发数据异常变成可复现的失败。它是测试配置，不是可以替代所有边界设计的魔法开关。
+
+### 学习目标
+
+完成本节后，你能区分 ASan、UBSan 和 TSan 的职责，为 CMake target 配置诊断构建；从报告的第一处自有代码追踪对象生命周期；把现场崩溃缩成回归测试，并解释为什么“换成更大的数组”不是修复。每次实验都要记录编译器、优化级别、输入序号和运行结果。
+
+### 从 JS 运行时检查到 C++ 构建配置
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const values = new Array(2).fill(0);
+console.log(values[5]); // undefined`}
+  targetLabel="C++"
+  targetLanguage="cpp"
+  target={`target_compile_options(sensor_core PRIVATE
+  -fsanitize=address,undefined -fno-omit-frame-pointer)
+std::vector<int> values(2);
+const int first = values.at(0);`}
+/>
+
+ASan 重点发现越界、double free、use-after-free，UBSan 检查一部分未定义算术和类型行为；ThreadSanitizer 面向数据竞争，不能和 ASan 在多数工具链中随意混用。把 sanitizer 选项绑定到 debug/sanitized target，避免污染发布构建和第三方二进制。对 Clang/GCC 使用 `-g` 和 frame pointer，错误堆栈才容易符号化。
+
+```cmake
+add_library(sanitized INTERFACE)
+target_compile_options(sanitized INTERFACE -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined)
+target_link_options(sanitized INTERFACE -fsanitize=address,undefined)
+target_link_libraries(sensor_core PRIVATE sanitized)
+```
+
+编译时检查 `cmake --build build --verbose`，确认 compile 和 link 都带有 sanitizer。不要只加 `target_compile_options`，否则链接阶段可能缺少 runtime。发布 target 应保持独立，机器人现场需要稳定性能时不能误用诊断配置。
+
+### 先保留最小触发测试
+
+```cpp
+#include <cassert>
+#include <vector>
+
+int read_sample(const std::vector<int>& samples, std::size_t index) {
+  assert(index < samples.size());
+  return samples.at(index);
+}
+
+int main() {
+  const std::vector<int> samples{4, 8};
+  assert(read_sample(samples, 1) == 8);
+}
+```
+
+生产代码的 `assert` 是否在 Release 保留，要根据契约决定；这里 `.at()` 为边界异常提供第二层保护。练习中可以为非法索引写一个单独测试，先看到 sanitizer/异常，再修正调用者。每个报告要记下第一处用户代码栈、对象分配位置和释放位置，不要只贴最后一行 `SEGV`。
+
+### ASan：访问边界与释放时机
+
+```cpp
+#include <vector>
+int main() {
+  auto* samples = new std::vector<int>{4, 8};
+  int value = (*samples)[2]; // g++ -fsanitize=address 应报告越界
+  delete samples;
+  return value;
+}
+```
+
+运行后寻找 `READ`、分配位置和第一处项目栈帧。修复应在解析包长后再访问，或用返回错误的边界 API；不能简单把容器容量从 2 改成 3。传感器长度来自外部设备时，检查必须发生在任何 `memcpy` 或索引之前。
+
+### 读报告的方向
+
+ASan 报告里的 `READ of size` 说明访问动作，`freed by` 和 `previously allocated` 说明生命周期链；沿着第一个属于自己项目的栈帧回到容器或指针产生处。UBSan 的 `signed integer overflow` 可能来自把传感器 tick 加到有符号窄类型，先修类型或范围，而不是加一个强转。若 sanitizer 只在优化构建复现，检查优化改变的时序，但不要因此关闭检查。
+
+### UBSan：单位和整数范围
+
+```cpp
+#include <cstdint>
+int main() {
+  std::int32_t ticks = 2'000'000'000;
+  ticks *= 2; // 传感器 tick 累加可能溢出
+  return ticks == 0;
+}
+```
+
+用 `-fsanitize=undefined` 验证报告，再决定使用 `std::uint64_t`、范围检查或饱和运算。类型转换不能让物理量自动正确：纳秒、毫秒和秒要在接口名或类型中表达清楚。修复后同时跑正常范围、边界范围和超范围输入。
+
+### TSan：竞争和错误的同步假设
+
+```cpp
+#include <thread>
+int count = 0;
+void add() { ++count; }
+int main() {
+  std::thread a{add}, b{add};
+  a.join(); b.join();
+}
+```
+
+用 `-fsanitize=thread -pthread` 构建，TSan 应指出两个线程无同步写入。修复方案是 atomic、mutex 或消息交接；`sleep_for` 只改变发生概率。队列和状态对象被多个 ROS 2 callback 使用时，优先保留最小复现再扩大到完整节点。
+
+### 常见编译与运行时排错
+
+`unrecognized argument -fsanitize` 表示编译器或平台不支持该组合，确认工具链；链接时也必须带 sanitizer 选项，否则会缺少运行时库。程序启动就失败可能是 sanitizer runtime 与动态库冲突。报告中若只有第三方库帧，先用最小输入确认是否由自己的边界触发。ROS 2 节点要把参数、回调和消息缓冲区纳入最小复现，真实硬件只负责产生同样的输入。
+
+### 从发现到修复
+
+找到错误后，优先修复所有权、范围或整数表示，再保留一个回归测试。用 `vector::at` 只能改变症状，若业务要求丢弃坏消息，应该在解析边界检查并返回错误；若接口保证索引有效，调用者应在契约处验证。Sanitizer 通过只能说明这组路径没触发问题，不能宣称整个程序没有未定义行为。
+
+### 调试路径与机器人验收
+
+记录 `sequence`、`frame_id`、输入文件和构建 flag；把失败 rosbag 缩成一条消息；在测试中断言修复后的错误码或安全动作；再用同一 sanitizer 配置重跑。验收至少覆盖坏包长、过期消息、线程关闭后的访问和正常回放。指标可包括 sanitizer failure count、last_sequence 和 dropped_count，避免只凭“程序没有崩”判断安全。
+
+<KeyIdea title="Sanitizer 给边界问题提供证据">
+  <p>测试先稳定输入，Sanitizer 再追踪访问和寿命；报告中的分配、释放和使用栈能帮助你修根因。保留最小回归用例，才能防止下一次重现。</p>
+</KeyIdea>
+
+## 迁移练习
+
+写一个固定长度的 `scan` 访问函数和测试：合法索引返回值，非法索引返回错误或抛出清晰异常。分别用 ASan/UBSan 构建运行；再检查一个会溢出的 tick 计算，决定应使用 `std::uint64_t` 还是显式范围检查，并记录报告中的第一处自有代码。
+
+<Exercise
+  title="把一条内存报告追到源头"
+  prompt="为 vector 访问错误创建最小测试，让工具报告问题；随后按分配/使用/释放链修复，并保留回归测试。"
+  hint="先让非法索引可重复，再看第一处属于项目的堆栈；不要用 try/catch 或 sleep 遮蔽越界。"
+  solution={`测试非法索引并在 sanitizer 构建运行；修复可以在进入函数前用 size 检查并返回错误，或在明确异常语义时使用 at。若是悬空指针，修正拥有者和借用生命周期；最后重新运行合法与非法两组测试，并保留触发过的用例。`}
+/>
+
+<SolutionReveal>
+  <p>Sanitizer 的价值不在于让每个访问都换成 at，而在于把隐藏的内存契约变成带堆栈的证据。掌握这套流程后，再进入并发时要区分内存错误和数据竞争。</p>
+</SolutionReveal>

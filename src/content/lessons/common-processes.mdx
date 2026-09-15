@@ -1,0 +1,92 @@
+---
+id: common-processes
+slug: processes-stdio-and-exit-codes
+title: "进程、标准输入输出与退出码"
+summary: "理解脚本、子进程和命令行工具如何通过 stdin、stdout、stderr 协作。"
+track: common
+order: 15
+durationMinutes: 14
+concepts: [processes, stdio, exit codes]
+prerequisites: [common-config]
+---
+
+import CompareCode from "../../components/CompareCode.astro";
+import KeyIdea from "../../components/KeyIdea.astro";
+import Exercise from "../../components/Exercise.astro";
+import SolutionReveal from "../../components/SolutionReveal.astro";
+
+## 进程、标准输入输出与退出码
+
+npm scripts 经常把多个工具串在一起。进入 Python 和 C++ 后，进程的标准流、退出码和信号会直接影响数据管线和容器编排。把 CLI 当成 API，就要像设计 HTTP 接口一样定义输入格式、输出格式、退出码、超时和终止行为。父进程不能只看“子进程结束了”，还要知道它是成功退出、被信号终止，还是输出了不完整结果。
+
+### 命令行程序也是一种 API
+
+下面这段代码只保留同一个意图，重点观察输入边界、数据流和失败语义，而不是逐字符翻译。
+
+<CompareCode
+  sourceLabel="JS / TS"
+  sourceLanguage="typescript"
+  source={`const child = spawn("python", ["prepare.py"], { stdio: "pipe" });
+child.stdout.on("data", chunk => process.stdout.write(chunk));
+child.on("exit", code => process.exit(code ?? 1));`}
+  targetLabel="Python / C++"
+  targetLanguage="text"
+  target={`# Python
+result = subprocess.run(["python", "prepare.py"],
+    input=payload, text=True, capture_output=True, check=False)
+raise SystemExit(result.returncode)
+
+// C++
+int code = std::system("python prepare.py");
+return WEXITSTATUS(code);`}
+/>
+
+### 三条通道和退出码
+
+stdout 用于机器可读结果，stderr 用于诊断信息，stdin 用于结构化输入或管道数据。约定 `0` 表示成功，`2` 表示参数/输入错误，其他非零值表示运行失败，并把约定写进文档。不要把调试文字混进 stdout，否则下游 JSON 解析会随机失败。大输出要考虑管道背压，父子进程都必须持续消费对方输出，避免缓冲区互相等待。
+
+```python
+import json
+import sys
+
+def main() -> int:
+    try:
+        payload = json.load(sys.stdin)
+        result = transform(payload)
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"invalid input: {exc}", file=sys.stderr)
+        return 2
+    json.dump(result, sys.stdout)
+    sys.stdout.write("\n")
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+### 子进程生命周期
+
+启动子进程时使用参数数组而不是 shell 字符串，显式设置工作目录、环境和超时。父进程取消时要终止子进程并等待回收；子进程收到 SIGTERM 或 Windows 等价信号后应尽量关闭文件、刷新必要输出。C++ 的 `std::system` 难以区分细粒度状态，生产工具应使用更明确的进程 API 或封装层。
+
+### 常见错误与排错思路
+
+最常见的错误是把 stderr 当成失败、把非零退出码忽略，或子进程死锁后只等待不读输出。排错时同时记录命令名、pid、退出码、信号、运行时长和 stdout/stderr 字节数；先独立运行子命令，再在父进程中复现。若管道输出是空的，检查是否只读到缓冲区未刷新的内容，是否在进程结束前错误地关闭了流。
+
+<KeyIdea title="命令行程序也是一种 API">
+  <p>稳定的进程边界能把 JS/TS、Python 和 C++ 工具组合成一条可靠流水线；stdout、stderr、退出码和生命周期都属于这份 API。</p>
+</KeyIdea>
+
+## 迁移练习
+
+请完成：设计一个 CLI，使它把结果写 stdout，把日志写 stderr，并在输入无效、子进程超时和成功时返回不同退出码。说明父进程如何回收子进程。
+
+<Exercise
+  title="进程、标准输入输出与退出码练习"
+  prompt="设计一个 CLI，使它把结果写 stdout，把日志写 stderr，并在输入无效、子进程超时和成功时返回不同退出码。说明父进程如何回收子进程。"
+  hint="先画出父进程、子进程和三条通道，再定义每种退出码；取消时先发终止信号再等待。"
+  solution={`结果只写 stdout；诊断写 stderr；参数或数据校验失败返回 2，子进程超时返回 124，未处理异常返回 1，成功返回 0。父进程设置 deadline，超时终止并 wait 回收子进程，再记录 pid、退出状态和 request_id。`}
+/>
+
+<SolutionReveal>
+  <p>稳定的进程边界能把 JS/TS、Python 和 C++ 工具组合成一条可靠流水线。完成后，请用一条 JSONL 管道测试 stdout 可解析、stderr 不污染结果，以及超时后没有遗留子进程。</p>
+</SolutionReveal>
