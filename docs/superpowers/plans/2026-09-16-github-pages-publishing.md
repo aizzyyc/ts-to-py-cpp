@@ -282,14 +282,14 @@ Expected: all tests pass, Astro reports 0 errors/warnings/hints, and the static 
 
 Verify the built HTML references `/ts-to-py-cpp/` for internal links and assets, does not contain root-relative internal links such as `href="/learn"` or `href="/search"`, and that `dist/pagefind/` exists after the build.
 
-- [ ] **Step 3: Commit the implementation**
+- [x] **Step 3: Commit the implementation**
 
 ```text
 git add .github/workflows/deploy.yml astro.config.mjs README.md package.json tasks/todo.md tests/github-pages.test.ts
 git commit -m "ci: deploy site to GitHub Pages"
 ```
 
-- [ ] **Step 4: Push to `origin/main`**
+- [x] **Step 4: Push to `origin/main`**
 
 ```text
 git push origin main
@@ -297,7 +297,7 @@ git push origin main
 
 Do not force-push. If remote history changes before the push, fetch and inspect it before integrating.
 
-- [ ] **Step 5: Configure GitHub Pages and repository About metadata**
+- [x] **Step 5: Configure GitHub Pages and repository About metadata**
 
 In `aizzyyc/ts-to-py-cpp`:
 
@@ -308,14 +308,21 @@ In `aizzyyc/ts-to-py-cpp`:
 
 Do not create a release or package for this static course site yet.
 
-- [ ] **Step 6: Verify the remote result**
+- [x] **Step 6: Verify the remote result**
 
 Check the Actions run, open the Pages URL, and verify the home page, `/learn`, a lesson page, and search. Confirm local `main` and `origin/main` resolve to the same commit and the worktree is clean.
 
 ### Review checklist
 
-- [ ] Spec requirements all map to Tasks 1–4.
-- [ ] No placeholders remain in this plan.
-- [ ] The workflow's build job gates the deploy job with `needs: build`.
-- [ ] The Pages URL and Astro base path are consistent in config, README, and GitHub metadata.
-- [ ] Local tests, checks, and build are freshly verified before claiming completion.
+- [x] Spec requirements all map to Tasks 1–4.
+- [x] No placeholders remain in this plan.
+- [x] The workflow's build job gates the deploy job with `needs: build`.
+- [x] The Pages URL and Astro base path are consistent in config, README, and GitHub metadata.
+- [x] Local tests, checks, and build are freshly verified before claiming completion.
+
+### Verification record
+
+- Local: `npm test` 30/30 passed; `npm run check` reported 0 errors, 0 warnings, and 0 hints; `npm run build` generated 95 pages and indexed 95 pages with Pagefind.
+- Remote: GitHub Actions Run 2 for commit `f18a144` completed successfully; both `build` and `deploy` jobs passed.
+- Live Pages: homepage, `/learn`, Python lesson detail, and `/search` loaded successfully; a live `RAII` search returned 12 relevant lessons.
+- GitHub About: description, website, and 10 topics are visible; no release or package was created.

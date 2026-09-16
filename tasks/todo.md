@@ -168,8 +168,12 @@
 - [x] 补充 README 的在线学习、Actions 和贡献说明
 - [x] 统一模板与浏览器脚本的站点子路径链接
 - [x] 在 GitHub About 更新 description、website 和 topics
-- [ ] 运行测试、类型检查、生产构建并验证 Pages 在线页面
+- [x] 运行测试、类型检查、生产构建并验证 Pages 在线页面
 
 ## 本轮 GitHub Pages Review
 
-- 待实现与验收后填写。
+- GitHub Pages source 已设置为 `GitHub Actions`，在线地址为 `https://aizzyyc.github.io/ts-to-py-cpp/`。
+- 本地门禁：`npm test` 30/30 通过；`npm run check` 为 0 errors、0 warnings、0 hints；`npm run build` 生成 95 个页面并完成 95 页 Pagefind 索引。
+- 远程门禁：commit `f18a144` 的 GitHub Actions Run 2 成功，`build` 与 `deploy` 均通过。
+- 在线验收：首页、`/learn`、Python 示例课程、`/search` 均可访问；搜索 `RAII` 返回 12 节相关课程。
+- GitHub About 已补充 description、website 和 10 个 topics；未创建 release 或 package。
