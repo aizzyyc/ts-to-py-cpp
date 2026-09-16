@@ -167,7 +167,7 @@
 - [x] 配置 Astro `site` / `base` 与 GitHub Actions Pages 工作流
 - [x] 补充 README 的在线学习、Actions 和贡献说明
 - [x] 统一模板与浏览器脚本的站点子路径链接
-- [ ] 在 GitHub About 更新 description、website 和 topics
+- [x] 在 GitHub About 更新 description、website 和 topics
 - [ ] 运行测试、类型检查、生产构建并验证 Pages 在线页面
 
 ## 本轮 GitHub Pages Review
