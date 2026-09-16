@@ -1,11 +1,12 @@
 ---
 import BaseLayout from "../../layouts/BaseLayout.astro";
+import ContinueLearning from "../../components/ContinueLearning.astro";
 import ProgressIndicator from "../../components/ProgressIndicator.astro";
 import RouteSidebar from "../../components/RouteSidebar.astro";
-import { getLessonSection, LESSONS, TRACK_DESCRIPTIONS, TRACK_SECTION_LABELS, type LessonSection, type Track } from "../../lib/lessons";
+import { getCoursePhases, getPhaseLessons } from "../../lib/course-flow";
+import { LESSONS, type Track } from "../../lib/lessons";
 
 const tracks: Track[] = ["common", "python", "cpp"];
-const sections: LessonSection[] = ["foundation", "specialization"];
 ---
 
 <BaseLayout title="学习路线 · LangShift">
@@ -21,21 +22,29 @@ const sections: LessonSection[] = ["foundation", "specialization"];
         <div><span class="eyebrow">CURRENT PATH</span><strong data-route-mode-label></strong><span data-route-mode-copy>语言迁移基础 + 专项内容</span></div>
         <a href="/learn" data-clear-goal>查看全部路线</a>
       </div>
+      <ContinueLearning />
       <div class="learn-layout">
         <RouteSidebar lessons={LESSONS} />
         <div>
          {tracks.map((track) => {
             const trackLessons = LESSONS.filter((lesson) => lesson.track === track).sort((a, b) => a.order - b.order);
-            const groups = sections
-              .map((section) => ({ section, lessons: trackLessons.filter((lesson) => getLessonSection(lesson) === section) }))
-              .filter((group) => group.lessons.length > 0);
+            const phases = getCoursePhases(track);
             return <section class="track-section" id={track} data-track={track}>
-              {groups.map(({ section, lessons }) => {
-                const description = section === "foundation" && track !== "common"
-                  ? ["把 JS/TS 经验迁移到 ", track === "python" ? "Python" : "现代 C++", "，先建立语言基础。"].join("")
-                  : TRACK_DESCRIPTIONS[track];
-                return <div class="track-subsection" data-track-section={section}>
-                  <div class="track-section-header"><div class="track-title-wrap"><span class:list={["track-dot", track]}></span><h2>{TRACK_SECTION_LABELS[track][section]}</h2><p>{description}</p></div><span class="track-count">{lessons.length} LESSONS</span></div>
+              {phases.map((phase) => {
+                const lessons = getPhaseLessons(trackLessons, phase);
+                const checkpointLesson = phase.checkpointLessonId ? lessons.find((lesson) => lesson.id === phase.checkpointLessonId) : undefined;
+                const duration = lessons.reduce((total, lesson) => total + lesson.durationMinutes, 0);
+                return <div class:list={["track-subsection", { "phase-project": phase.project }]} data-phase-id={phase.id} data-phase-track={track}>
+                  <div class="track-section-header">
+                    <div class="track-title-wrap"><span class:list={["track-dot", track]}></span><div><span class="phase-kind">{phase.project ? "结课项目" : "学习阶段"}</span><h2>{phase.title}</h2><p>{phase.description}</p></div></div>
+                    <span class="track-count">{lessons.length} LESSONS</span>
+                  </div>
+                  <div class="phase-meta">
+                    <span data-phase-progress data-phase-total={lessons.length}>0/{lessons.length}</span>
+                    <span>{duration} 分钟</span>
+                    {checkpointLesson && <span class="phase-checkpoint">阶段检查：{checkpointLesson.title}</span>}
+                  </div>
+                  <div class="phase-progress-bar" aria-hidden="true"><span data-phase-bar></span></div>
                   <div class="course-list">
                     {lessons.map((lesson) => <a class="course-row" href={`/learn/${lesson.track}/${lesson.slug}`} data-lesson-id={lesson.id}>
                       <span class="course-index">{String(lesson.order).padStart(2, "0")}</span>

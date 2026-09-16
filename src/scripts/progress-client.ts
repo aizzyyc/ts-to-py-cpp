@@ -1,13 +1,15 @@
 import {
   createProgressStore,
   markLessonComplete,
+  markLessonViewed,
   setSelectedGoal,
   type Goal,
   type ProgressState,
   type StorageLike,
 } from "../lib/progress";
 import { getVisibleTracks, isTrackVisible } from "../lib/routes";
-import type { Track } from "../lib/lessons";
+import { getNextLesson, getPhaseForLesson, getPhaseLessons } from "../lib/course-flow";
+import { LESSONS, type Track } from "../lib/lessons";
 
 const getStorage = (): StorageLike | null => {
   try {
@@ -49,6 +51,66 @@ function getVisibleLessonIds(goal: Goal | null): Set<string> {
   return lessonIds;
 }
 
+function getResumeLesson(state: ProgressState, goal: Goal | null) {
+  const viewed = state.lastViewedLessonId
+    ? LESSONS.find((lesson) => lesson.id === state.lastViewedLessonId)
+    : undefined;
+  if (viewed && !state.completedLessonIds.includes(viewed.id) && isTrackVisible(viewed.track, goal)) {
+    return viewed;
+  }
+  return getNextLesson(LESSONS, goal, state);
+}
+
+function renderResume(state: ProgressState, goal: Goal | null): void {
+  const card = document.querySelector<HTMLElement>("[data-resume-card]");
+  if (!card) return;
+
+  const lesson = getResumeLesson(state, goal);
+  const title = card.querySelector<HTMLElement>("[data-resume-title]");
+  const phase = card.querySelector<HTMLElement>("[data-resume-phase]");
+  const copy = card.querySelector<HTMLElement>("[data-resume-copy]");
+  const status = card.querySelector<HTMLElement>("[data-resume-status]");
+  const link = card.querySelector<HTMLAnchorElement>("[data-resume-link]");
+
+  if (!lesson) {
+    card.hidden = false;
+    if (title) title.textContent = "路线已完成";
+    if (phase) phase.textContent = goal === "ai" ? "Python / AI" : goal === "robotics" ? "C++ / Robotics" : "迁移基础";
+    if (copy) copy.textContent = "你已经完成当前路线，可以回顾课程或重新挑战结课项目。";
+    if (status) status.textContent = "全部完成";
+    if (link) {
+      link.href = "/learn";
+      link.innerHTML = '回顾课程路线 <span aria-hidden="true">↗</span>';
+    }
+    return;
+  }
+
+  const lessonPhase = getPhaseForLesson(lesson);
+  card.hidden = false;
+  if (title) title.textContent = lesson.title;
+  if (phase) phase.textContent = lessonPhase?.title ?? "下一节课程";
+  if (copy) copy.textContent = `${lesson.summary} 预计 ${lesson.durationMinutes} 分钟。`;
+  if (status) status.textContent = state.lastViewedLessonId === lesson.id ? "接着上次学习" : "下一节推荐";
+  if (link) {
+    link.href = `/learn/${lesson.track}/${lesson.slug}`;
+    link.innerHTML = '继续学习 <span aria-hidden="true">↗</span>';
+  }
+}
+
+function renderLessonPhase(state: ProgressState): void {
+  const card = document.querySelector<HTMLElement>("[data-lesson-phase]");
+  if (!card) return;
+  const currentLessonId = document.querySelector<HTMLElement>("[data-complete-lesson]")?.dataset.completeLesson;
+  const currentLesson = currentLessonId ? LESSONS.find((lesson) => lesson.id === currentLessonId) : undefined;
+  const phase = currentLesson ? getPhaseForLesson(currentLesson) : undefined;
+  const phaseLessons = phase ? getPhaseLessons(LESSONS, phase) : [];
+  const completed = phaseLessons.filter((lesson) => state.completedLessonIds.includes(lesson.id)).length;
+  const progress = card.querySelector<HTMLElement>("[data-lesson-phase-progress]");
+  const bar = card.querySelector<HTMLElement>("[data-lesson-phase-bar]");
+  if (progress) progress.textContent = `${completed}/${phaseLessons.length}`;
+  if (bar) bar.style.width = `${phaseLessons.length ? Math.min(100, (completed / phaseLessons.length) * 100) : 0}%`;
+}
+
 function render(state: ProgressState, goal: Goal | null): void {
   const visibleLessonIds = getVisibleLessonIds(goal);
   const totalLessons = visibleLessonIds.size || pageTotalLessons;
@@ -75,6 +137,23 @@ function render(state: ProgressState, goal: Goal | null): void {
     const label = button.querySelector<HTMLElement>("[data-complete-label]");
     if (label) label.textContent = completedState ? "已完成 · 再次点击取消" : "标记为已完成";
   });
+  document.querySelectorAll<HTMLElement>("[data-phase-id]:not([data-lesson-phase])").forEach((phaseElement) => {
+    const phaseTrack = phaseElement.dataset.phaseTrack as Track | undefined;
+    const phaseLessonIds = new Set(
+      [...phaseElement.querySelectorAll<HTMLElement>("[data-lesson-id]")]
+        .map((element) => element.dataset.lessonId)
+        .filter((id): id is string => Boolean(id)),
+    );
+    const visiblePhaseIds = phaseTrack && !isTrackVisible(phaseTrack, goal) ? new Set<string>() : phaseLessonIds;
+    const phaseCompleted = state.completedLessonIds.filter((id) => visiblePhaseIds.has(id)).length;
+    const phaseTotal = phaseLessonIds.size;
+    const progress = phaseElement.querySelector<HTMLElement>("[data-phase-progress]");
+    const bar = phaseElement.querySelector<HTMLElement>("[data-phase-bar]");
+    if (progress) progress.textContent = `${phaseCompleted}/${phaseTotal}`;
+    if (bar) bar.style.width = `${phaseTotal ? Math.min(100, (phaseCompleted / phaseTotal) * 100) : 0}%`;
+  });
+  renderLessonPhase(state);
+  renderResume(state, goal);
 }
 
 function applyRouteFilter(goal: Goal | null): void {
@@ -116,6 +195,14 @@ document.querySelectorAll<HTMLElement>("[data-goal]").forEach((element) => {
     store.write(setSelectedGoal(store.read(), goal));
     applyRouteFilter(goal);
     render(store.read(), goal);
+  });
+});
+
+document.querySelectorAll<HTMLAnchorElement>("a[data-lesson-id]").forEach((link) => {
+  link.addEventListener("click", () => {
+    const lessonId = link.dataset.lessonId;
+    if (!lessonId) return;
+    store.write(markLessonViewed(store.read(), lessonId));
   });
 });
 

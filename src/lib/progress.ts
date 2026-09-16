@@ -5,6 +5,7 @@ export interface ProgressState {
   selectedGoal: Goal | null;
   completedLessonIds: string[];
   lastLessonId: string | null;
+  lastViewedLessonId: string | null;
   updatedAt: string | null;
 }
 
@@ -20,6 +21,7 @@ export const DEFAULT_PROGRESS: ProgressState = {
   selectedGoal: null,
   completedLessonIds: [],
   lastLessonId: null,
+  lastViewedLessonId: null,
   updatedAt: null,
 };
 
@@ -53,6 +55,7 @@ function normalizeProgress(value: unknown): ProgressState {
     selectedGoal: isGoal(candidate.selectedGoal) ? candidate.selectedGoal : null,
     completedLessonIds,
     lastLessonId: typeof candidate.lastLessonId === "string" ? candidate.lastLessonId : null,
+    lastViewedLessonId: typeof candidate.lastViewedLessonId === "string" ? candidate.lastViewedLessonId : null,
     updatedAt: typeof candidate.updatedAt === "string" ? candidate.updatedAt : null,
   };
 }
@@ -87,6 +90,22 @@ export function markLessonComplete(
     ...normalized,
     completedLessonIds: [...new Set([...normalized.completedLessonIds, lessonId])],
     lastLessonId: lessonId,
+    updatedAt,
+  };
+}
+
+export function markLessonViewed(
+  state: ProgressState,
+  lessonId: string,
+  updatedAt = new Date().toISOString(),
+): ProgressState {
+  if (!lessonId.trim()) {
+    return state;
+  }
+
+  return {
+    ...normalizeProgress(state),
+    lastViewedLessonId: lessonId,
     updatedAt,
   };
 }

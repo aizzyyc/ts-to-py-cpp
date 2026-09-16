@@ -8,8 +8,8 @@
     "build": "astro build && pagefind --site dist",
     "preview": "astro preview",
     "check": "astro check",
-    "test": "node --experimental-strip-types --test tests/progress.test.ts tests/lessons.test.ts tests/layout.test.ts tests/content.test.ts tests/routes.test.ts tests/search.test.ts",
-    "test:watch": "node --experimental-strip-types --test --watch tests/progress.test.ts tests/lessons.test.ts tests/layout.test.ts tests/content.test.ts tests/routes.test.ts tests/search.test.ts"
+    "test": "node --experimental-strip-types --test tests/progress.test.ts tests/lessons.test.ts tests/layout.test.ts tests/content.test.ts tests/routes.test.ts tests/search.test.ts tests/course-flow.test.ts",
+    "test:watch": "node --experimental-strip-types --test --watch tests/progress.test.ts tests/lessons.test.ts tests/layout.test.ts tests/content.test.ts tests/routes.test.ts tests/search.test.ts tests/course-flow.test.ts"
   },
   "dependencies": {
     "@astrojs/mdx": "^4.3.0",

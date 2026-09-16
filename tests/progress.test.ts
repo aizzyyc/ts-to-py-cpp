@@ -4,6 +4,7 @@ import {
   DEFAULT_PROGRESS,
   PROGRESS_STORAGE_KEY,
   createProgressStore,
+  markLessonViewed,
   markLessonComplete,
   parseProgress,
   serializeProgress,
@@ -16,6 +17,7 @@ describe("progress state", () => {
       selectedGoal: null,
       completedLessonIds: [],
       lastLessonId: null,
+      lastViewedLessonId: null,
       updatedAt: null,
     });
     assert.equal(PROGRESS_STORAGE_KEY, "langshift-progress:v1");
@@ -38,6 +40,7 @@ describe("progress state", () => {
         selectedGoal: null,
         completedLessonIds: undefined as unknown as string[],
         lastLessonId: null,
+        lastViewedLessonId: null,
         updatedAt: null,
       },
       "common-values",
@@ -52,6 +55,16 @@ describe("progress state", () => {
 
     const state = markLessonComplete(DEFAULT_PROGRESS, "python-data");
     assert.deepEqual(parseProgress(serializeProgress(state)), state);
+  });
+
+  it("preserves old progress and records the last viewed lesson", () => {
+    const oldState = parseProgress(
+      JSON.stringify({ version: 1, completedLessonIds: ["python-syntax"], lastLessonId: "python-syntax" }),
+    );
+    assert.equal(oldState.lastViewedLessonId, null);
+    const viewed = markLessonViewed(oldState, "python-control-flow");
+    assert.equal(viewed.lastViewedLessonId, "python-control-flow");
+    assert.deepEqual(parseProgress(serializeProgress(viewed)).completedLessonIds, ["python-syntax"]);
   });
 
   it("falls back to memory when localStorage is unavailable", () => {

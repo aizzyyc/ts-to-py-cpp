@@ -22,7 +22,7 @@ const { currentLessonId, previous, next } = Astro.props;
       </a>
     ) : <span></span>}
     {next && (
-      <a class="nav-link next" href={`/learn/${next.track}/${next.slug}`}>
+      <a class="nav-link next" href={`/learn/${next.track}/${next.slug}`} data-next-lesson={next.id}>
         <span><small>下一节</small>{next.title}</span><span aria-hidden="true">→</span>
       </a>
     )}

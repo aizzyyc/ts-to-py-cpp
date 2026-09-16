@@ -4,6 +4,7 @@ import BaseLayout from "../../../layouts/BaseLayout.astro";
 import LessonNav from "../../../components/LessonNav.astro";
 import RouteSidebar from "../../../components/RouteSidebar.astro";
 import LessonResources from "../../../components/LessonResources.astro";
+import { getCoursePhases, getPhaseLessons } from "../../../lib/course-flow";
 import { LESSONS, TRACK_LABELS, type Track } from "../../../lib/lessons";
 
 export async function getStaticPaths() {
@@ -21,6 +22,9 @@ if (!current) throw new Error(`Lesson metadata missing for ${entry.data.id}`);
 const sameTrack = LESSONS.filter((lesson) => lesson.track === current.track).sort((a, b) => a.order - b.order);
 const previous = sameTrack.find((lesson) => lesson.order === current.order - 1);
 const next = sameTrack.find((lesson) => lesson.order === current.order + 1);
+const phase = getCoursePhases(current.track).find((candidate) => current.order >= candidate.startOrder && current.order <= candidate.endOrder);
+const phaseLessons = phase ? getPhaseLessons(LESSONS, phase) : [];
+const isCheckpoint = phase?.checkpointLessonId === current.id;
 ---
 
 <BaseLayout title={`${entry.data.title} · LangShift`} description={entry.data.summary}>
@@ -29,9 +33,14 @@ const next = sameTrack.find((lesson) => lesson.order === current.order + 1);
       <RouteSidebar lessons={LESSONS} currentTrack={entry.data.track as Track} currentLessonId={entry.data.id} />
       <article class="lesson-main">
         <nav class="lesson-breadcrumb" aria-label="面包屑导航"><a href="/learn">学习路线</a><span>/</span><a href={`/learn#${entry.data.track}`}>{TRACK_LABELS[entry.data.track]}</a><span>/</span><span>{String(entry.data.order).padStart(2, "0")}</span></nav>
-        <header class="lesson-header"><span class="eyebrow">{TRACK_LABELS[entry.data.track]} · LESSON {String(entry.data.order).padStart(2, "0")}</span><h1>{entry.data.title}</h1><p class="lesson-summary">{entry.data.summary}</p><div class="lesson-meta"><span>{entry.data.durationMinutes} 分钟</span><span>{entry.data.concepts.join(" · ")}</span></div></header>
+        <header class="lesson-header"><span class="eyebrow">{TRACK_LABELS[entry.data.track]} · {phase?.title ?? "LESSON"} · LESSON {String(entry.data.order).padStart(2, "0")}</span><h1>{entry.data.title}</h1><p class="lesson-summary">{entry.data.summary}</p><div class="lesson-meta"><span>{entry.data.durationMinutes} 分钟</span><span>{entry.data.concepts.join(" · ")}</span></div></header>
         <div class="lesson-content"><Content /></div>
         {(entry.data.track === "python" || entry.data.track === "cpp") && <LessonResources lessonId={entry.data.id} track={entry.data.track} />}
+        {phase && <section class="lesson-phase-card" data-lesson-phase={phase.id} data-lesson-phase-track={phase.track} data-lesson-phase-total={phaseLessons.length} aria-label="当前学习阶段">
+          <div class="lesson-phase-heading"><div><span class="phase-kind">当前学习阶段</span><strong>{phase.title}</strong></div><span data-lesson-phase-progress>0/{phaseLessons.length}</span></div>
+          <div class="phase-progress-bar" aria-hidden="true"><span data-lesson-phase-bar></span></div>
+          <p>{isCheckpoint ? "本节是阶段检查点。完成练习后，再进入下一阶段。" : `阶段共 ${phaseLessons.length} 节课，按顺序完成更容易建立完整的迁移模型。`}</p>
+        </section>}
         <LessonNav currentLessonId={entry.data.id} previous={previous} next={next} />
       </article>
       <aside class="lesson-aside" aria-label="本节概览"><span class="aside-label">IN THIS LESSON</span><ul class="aside-list"><li class="active">核心概念</li><li>代码对照</li><li>小练习</li><li>迁移结论</li></ul></aside>
