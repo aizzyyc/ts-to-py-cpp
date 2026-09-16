@@ -177,3 +177,14 @@
 - 远程门禁：commit `f18a144` 的 GitHub Actions Run 2 成功，`build` 与 `deploy` 均通过。
 - 在线验收：首页、`/learn`、Python 示例课程、`/search` 均可访问；搜索 `RAII` 返回 12 节相关课程。
 - GitHub About 已补充 description、website 和 10 个 topics；未创建 release 或 package。
+
+## 本轮 Pages 访问故障排查
+
+- [x] 检查 Pages 服务端 HTTPS 返回、DNS 解析和 GitHub 远程状态
+- [x] 确认服务端与部署均正常，定位为旧内置浏览器标签的 `ERR_CONNECTION_CLOSED`
+- [x] 重新打开在线课程标签并确认首页可以加载
+
+### 本轮访问故障 Review
+
+- 服务端返回 `HTTP 200 OK`，在线课程首页、学习路线、示例课程和搜索页面均已重新访问确认。
+- 本次没有修改 Astro、GitHub Pages 或本机代理配置；保留现有可用部署。
