@@ -1,6 +1,7 @@
 ---
 import BaseLayout from "../layouts/BaseLayout.astro";
 import { LESSONS } from "../lib/lessons";
+import { sitePath } from "../lib/site-path";
 
 const totalLessons = LESSONS.length;
 ---
@@ -13,7 +14,7 @@ const totalLessons = LESSONS.length;
         <h1>把熟悉的 <em>JS/TS</em>，变成新的工程能力。</h1>
         <p class="hero-lead">为已经会做项目的开发者设计。用你熟悉的语言做参照，快速进入 Python、C++，再走向 AI 和机器人。</p>
         <div class="hero-actions">
-          <a class="button button-dark" href="/learn">开始探索路线 <span aria-hidden="true">↗</span></a>
+          <a class="button button-dark" href={sitePath("/learn")}>开始探索路线 <span aria-hidden="true">↗</span></a>
           <a class="button button-light" href="#method">了解学习方法</a>
         </div>
         <p class="hero-note">{totalLessons} 节短课 · 中文解释 · 每节 8–18 分钟 · 本地保存进度</p>
@@ -40,11 +41,11 @@ const totalLessons = LESSONS.length;
         <p>共同基础只学一次。之后按你想进入的现场，选择 Python 或 C++ 的实践路线。</p>
       </div>
       <div class="goal-grid">
-        <a class="goal-card" href="/learn?goal=ai" data-goal="ai">
+        <a class="goal-card" href={sitePath("/learn?goal=ai")} data-goal="ai">
           <div><div class="goal-icon" aria-hidden="true">⌁</div><h3>AI 工程路径</h3><p>先完成 JS/TS → Python 迁移基础，再进入数据、模型和 AI 服务工程。</p></div>
           <span class="goal-arrow" aria-hidden="true">↗</span>
         </a>
-        <a class="goal-card robotics" href="/learn?goal=robotics" data-goal="robotics">
+        <a class="goal-card robotics" href={sitePath("/learn?goal=robotics")} data-goal="robotics">
           <div><div class="goal-icon" aria-hidden="true">⊙</div><h3>机器人路径</h3><p>先完成 JS/TS → C++ 迁移基础，再进入消息、实时性和 ROS 2 工程。</p></div>
           <span class="goal-arrow" aria-hidden="true">↗</span>
         </a>

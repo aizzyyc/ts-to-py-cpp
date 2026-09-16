@@ -1,5 +1,6 @@
 ---
 import type { LessonMeta } from "../lib/lessons";
+import { sitePath } from "../lib/site-path";
 
 interface Props {
   currentLessonId: string;
@@ -17,12 +18,12 @@ const { currentLessonId, previous, next } = Astro.props;
   </button>
   <div class="lesson-nav-links">
     {previous ? (
-      <a class="nav-link previous" href={`/learn/${previous.track}/${previous.slug}`}>
+      <a class="nav-link previous" href={sitePath(`/learn/${previous.track}/${previous.slug}`)}>
         <span aria-hidden="true">←</span><span><small>上一节</small>{previous.title}</span>
       </a>
     ) : <span></span>}
     {next && (
-      <a class="nav-link next" href={`/learn/${next.track}/${next.slug}`} data-next-lesson={next.id}>
+      <a class="nav-link next" href={sitePath(`/learn/${next.track}/${next.slug}`)} data-next-lesson={next.id}>
         <span><small>下一节</small>{next.title}</span><span aria-hidden="true">→</span>
       </a>
     )}

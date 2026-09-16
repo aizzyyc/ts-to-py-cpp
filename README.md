@@ -2,6 +2,9 @@
 
 从 JavaScript / TypeScript 迁移到 Python 与 C++，面向 AI 和机器人开发的学习工作台。
 
+[![Deploy to GitHub Pages](https://github.com/aizzyyc/ts-to-py-cpp/actions/workflows/deploy.yml/badge.svg)](https://github.com/aizzyyc/ts-to-py-cpp/actions/workflows/deploy.yml)
+[![在线学习](https://img.shields.io/badge/在线学习-GitHub%20Pages-1f6feb)](https://aizzyyc.github.io/ts-to-py-cpp/)
+
 LangShift 不是把语法表换一种语言展示，而是从 JS/TS 开发者已经熟悉的思维出发，解释新的语言在数据模型、类型系统、内存、并发、工具链和工程实践上的差异。每节课都配有可对照的代码示例、迁移提醒、练习、提示和参考答案。
 
 项目地址：[github.com/aizzyyc/ts-to-py-cpp](https://github.com/aizzyyc/ts-to-py-cpp)
@@ -45,7 +48,7 @@ npm install
 npm run dev
 ```
 
-启动后访问 `http://localhost:4321`。
+启动后访问 `http://localhost:4321/ts-to-py-cpp/`。
 
 构建并预览生产版本：
 
@@ -55,6 +58,22 @@ npm run preview
 ```
 
 生产构建会先生成 Astro 静态页面，再使用 Pagefind 建立搜索索引。
+
+## GitHub 发布与贡献
+
+在线学习入口：[aizzyyc.github.io/ts-to-py-cpp](https://aizzyyc.github.io/ts-to-py-cpp/)。
+
+推送到 `main` 后，GitHub Actions 会依次执行测试、Astro 检查和生产构建；全部通过后自动发布 GitHub Pages。也可以在仓库的 **Actions** 页面手动运行部署工作流。
+
+欢迎通过 Issue 反馈课程问题或提出改进建议。提交代码时，请先创建分支或 Fork 仓库，在本地运行以下检查，再发起 Pull Request：
+
+```bash
+npm test
+npm run check
+npm run build
+```
+
+本项目当前是静态学习工作台，课程进度只保存在浏览器本地；不会在线执行用户代码，也不包含账号同步、AI 导师或真实 ROS 2 设备控制。
 
 ## 常用脚本
 

@@ -159,3 +159,17 @@
 - [x] `.gitignore` 已过滤依赖、构建产物、环境配置、编辑器文件和日志
 - [x] 远程 `main` 分支已写入当前项目的 134 个跟踪文件
 - [x] 远程 tree 与本地 `main` 当前提交的 tree 一致
+
+## 本轮 GitHub Pages 发布与仓库展示
+
+- [x] 固化 GitHub Pages 发布设计并创建实施计划
+- [x] 先用回归测试锁定 Astro 站点地址、工作流质量门禁和 README 在线入口
+- [x] 配置 Astro `site` / `base` 与 GitHub Actions Pages 工作流
+- [x] 补充 README 的在线学习、Actions 和贡献说明
+- [x] 统一模板与浏览器脚本的站点子路径链接
+- [ ] 在 GitHub About 更新 description、website 和 topics
+- [ ] 运行测试、类型检查、生产构建并验证 Pages 在线页面
+
+## 本轮 GitHub Pages Review
+
+- 待实现与验收后填写。

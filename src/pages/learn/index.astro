@@ -5,6 +5,7 @@ import ProgressIndicator from "../../components/ProgressIndicator.astro";
 import RouteSidebar from "../../components/RouteSidebar.astro";
 import { getCoursePhases, getPhaseLessons } from "../../lib/course-flow";
 import { LESSONS, type Track } from "../../lib/lessons";
+import { sitePath } from "../../lib/site-path";
 
 const tracks: Track[] = ["common", "python", "cpp"];
 ---
@@ -20,7 +21,7 @@ const tracks: Track[] = ["common", "python", "cpp"];
     <div class="page-container">
       <div class="route-mode" data-route-mode hidden>
         <div><span class="eyebrow">CURRENT PATH</span><strong data-route-mode-label></strong><span data-route-mode-copy>语言迁移基础 + 专项内容</span></div>
-        <a href="/learn" data-clear-goal>查看全部路线</a>
+        <a href={sitePath("/learn")} data-clear-goal>查看全部路线</a>
       </div>
       <ContinueLearning />
       <div class="learn-layout">
@@ -46,7 +47,7 @@ const tracks: Track[] = ["common", "python", "cpp"];
                   </div>
                   <div class="phase-progress-bar" aria-hidden="true"><span data-phase-bar></span></div>
                   <div class="course-list">
-                    {lessons.map((lesson) => <a class="course-row" href={`/learn/${lesson.track}/${lesson.slug}`} data-lesson-id={lesson.id}>
+                    {lessons.map((lesson) => <a class="course-row" href={sitePath(`/learn/${lesson.track}/${lesson.slug}`)} data-lesson-id={lesson.id}>
                       <span class="course-index">{String(lesson.order).padStart(2, "0")}</span>
                       <span class="course-copy"><h3>{lesson.title}</h3><p>{lesson.summary}</p></span>
                       <span class="course-tags">{lesson.concepts.slice(0, 2).map((concept) => <span class="tag">{concept}</span>)}</span>

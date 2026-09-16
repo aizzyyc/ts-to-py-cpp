@@ -1,5 +1,6 @@
 import { TRACK_LABELS, type Track } from "../lib/lessons";
 import { searchLessons, type SearchEntry } from "../lib/search";
+import { sitePath } from "../lib/site-path";
 
 const indexElement = document.querySelector<HTMLScriptElement>("#search-index");
 const form = document.querySelector<HTMLFormElement>("[data-search-form]");
@@ -43,7 +44,7 @@ if (indexElement && form && input && status && resultsContainer) {
     searchResults.innerHTML = results.length
       ? results.map((entry) => {
           const track = entry.track as Track;
-          return `<a class="search-result" href="/learn/${encodeURIComponent(track)}/${encodeURIComponent(entry.slug)}">
+          return `<a class="search-result" href="${sitePath(`/learn/${encodeURIComponent(track)}/${encodeURIComponent(entry.slug)}`)}">
             <div class="search-result-meta"><span class="search-result-track">${escapeHtml(TRACK_LABELS[track])}</span><span>${escapeHtml(entry.concepts.slice(0, 3).join(" · "))}</span></div>
             <h2>${escapeHtml(entry.title)}</h2>
             <p>${escapeHtml(entry.summary)}</p>
@@ -59,7 +60,7 @@ if (indexElement && form && input && status && resultsContainer) {
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     const query = input.value.trim();
-    const nextUrl = query ? `/search?q=${encodeURIComponent(query)}` : "/search";
+    const nextUrl = query ? sitePath(`/search?q=${encodeURIComponent(query)}`) : sitePath("/search");
     window.history.replaceState({}, "", nextUrl);
     render(query);
   });

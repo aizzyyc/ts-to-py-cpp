@@ -1,26 +1,28 @@
 ---
+import { sitePath } from "../lib/site-path";
+
 const pathname = Astro.url.pathname;
-const isLearn = pathname.startsWith("/learn");
+const isLearn = pathname.includes("/learn");
 ---
 
 <header class="site-header">
   <div class="page-container header-inner">
-    <a class="brand" href="/" aria-label="LangShift 首页">
+    <a class="brand" href={sitePath("/")} aria-label="LangShift 首页">
       <span class="brand-mark">L</span>
       <span>Lang<span class="brand-accent">Shift</span></span>
     </a>
     <nav class="desktop-nav" aria-label="主导航">
-      <a class:list-active={isLearn} href="/learn">学习路线</a>
-      <a href="/search">搜索课程</a>
-      <a href="/#method">学习方法</a>
+      <a class:list-active={isLearn} href={sitePath("/learn")}>学习路线</a>
+      <a href={sitePath("/search")}>搜索课程</a>
+      <a href={sitePath("/#method")}>学习方法</a>
     </nav>
     <div class="header-actions">
-      <a class="header-search" href="/search" aria-label="搜索课程">
+      <a class="header-search" href={sitePath("/search")} aria-label="搜索课程">
         <span class="search-glyph" aria-hidden="true">⌕</span>
         <span class="search-label">搜索</span>
         <kbd>/</kbd>
       </a>
-      <a class="button button-small button-dark" href="/learn">开始学习 <span aria-hidden="true">↗</span></a>
+      <a class="button button-small button-dark" href={sitePath("/learn")}>开始学习 <span aria-hidden="true">↗</span></a>
     </div>
   </div>
 </header>

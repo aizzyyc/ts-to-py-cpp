@@ -6,6 +6,7 @@ import RouteSidebar from "../../../components/RouteSidebar.astro";
 import LessonResources from "../../../components/LessonResources.astro";
 import { getCoursePhases, getPhaseLessons } from "../../../lib/course-flow";
 import { LESSONS, TRACK_LABELS, type Track } from "../../../lib/lessons";
+import { sitePath } from "../../../lib/site-path";
 
 export async function getStaticPaths() {
   const entries = await getCollection("lessons");
@@ -32,7 +33,7 @@ const isCheckpoint = phase?.checkpointLessonId === current.id;
     <div class="page-container lesson-layout">
       <RouteSidebar lessons={LESSONS} currentTrack={entry.data.track as Track} currentLessonId={entry.data.id} />
       <article class="lesson-main">
-        <nav class="lesson-breadcrumb" aria-label="面包屑导航"><a href="/learn">学习路线</a><span>/</span><a href={`/learn#${entry.data.track}`}>{TRACK_LABELS[entry.data.track]}</a><span>/</span><span>{String(entry.data.order).padStart(2, "0")}</span></nav>
+        <nav class="lesson-breadcrumb" aria-label="面包屑导航"><a href={sitePath("/learn")}>学习路线</a><span>/</span><a href={sitePath(`/learn#${entry.data.track}`)}>{TRACK_LABELS[entry.data.track]}</a><span>/</span><span>{String(entry.data.order).padStart(2, "0")}</span></nav>
         <header class="lesson-header"><span class="eyebrow">{TRACK_LABELS[entry.data.track]} · {phase?.title ?? "LESSON"} · LESSON {String(entry.data.order).padStart(2, "0")}</span><h1>{entry.data.title}</h1><p class="lesson-summary">{entry.data.summary}</p><div class="lesson-meta"><span>{entry.data.durationMinutes} 分钟</span><span>{entry.data.concepts.join(" · ")}</span></div></header>
         <div class="lesson-content"><Content /></div>
         {(entry.data.track === "python" || entry.data.track === "cpp") && <LessonResources lessonId={entry.data.id} track={entry.data.track} />}

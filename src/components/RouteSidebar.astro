@@ -2,6 +2,7 @@
 import type { LessonMeta, Track } from "../lib/lessons";
 import { TRACK_DESCRIPTIONS, TRACK_LABELS } from "../lib/lessons";
 import { getCoursePhases, getPhaseLessons } from "../lib/course-flow";
+import { sitePath } from "../lib/site-path";
 
 interface Props {
   lessons: LessonMeta[];
@@ -47,7 +48,7 @@ const tracks: Track[] = ["common", "python", "cpp"];
                   <li>
                     <a
                       class:list={["lesson-link", { current: lesson.id === currentLessonId }]}
-                      href={`/learn/${lesson.track}/${lesson.slug}`}
+                      href={sitePath(`/learn/${lesson.track}/${lesson.slug}`)}
                       data-lesson-id={lesson.id}
                     >
                       <span class="lesson-status" aria-hidden="true">{lesson.id === currentLessonId ? "→" : "○"}</span>
@@ -65,5 +66,5 @@ const tracks: Track[] = ["common", "python", "cpp"];
       );
     })}
   </div>
-  <a class="sidebar-reset" href="/learn" data-reset-progress>重置本设备进度</a>
+  <a class="sidebar-reset" href={sitePath("/learn")} data-reset-progress>重置本设备进度</a>
 </aside>

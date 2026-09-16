@@ -1,3 +1,7 @@
+---
+import { sitePath } from "../lib/site-path";
+---
+
 <div class="resume-card" data-resume-card hidden aria-live="polite">
   <div class="resume-card-heading">
     <span class="eyebrow">CONTINUE LEARNING</span>
@@ -9,6 +13,6 @@
       <h2 data-resume-title>从第一节开始</h2>
       <p data-resume-copy>选择一条路线，完成第一节迁移课程。</p>
     </div>
-    <a class="button button-dark" href="/learn" data-resume-link>查看课程路线 <span aria-hidden="true">↗</span></a>
+    <a class="button button-dark" href={sitePath("/learn")} data-resume-link>查看课程路线 <span aria-hidden="true">↗</span></a>
   </div>
 </div>

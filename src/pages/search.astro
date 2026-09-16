@@ -1,6 +1,7 @@
 ---
 import BaseLayout from "../layouts/BaseLayout.astro";
 import { getCollection } from "astro:content";
+import { sitePath } from "../lib/site-path";
 
 const lessons = await getCollection("lessons");
 const searchEntries = lessons.map(({ data, body }) => ({
@@ -31,7 +32,7 @@ const searchIndex = JSON.stringify(searchEntries).replace(/</g, "\\u003c");
         </form>
         <p class="search-status" data-search-status aria-live="polite">输入关键词开始搜索。</p>
         <div class="search-results" data-search-results></div>
-        <noscript><p class="search-fallback">请启用 JavaScript 来使用课程搜索，或者直接从<a href="/learn">学习路线</a>浏览。</p></noscript>
+        <noscript><p class="search-fallback">请启用 JavaScript 来使用课程搜索，或者直接从<a href={sitePath("/learn")}>学习路线</a>浏览。</p></noscript>
       </div>
     </div>
   </section>

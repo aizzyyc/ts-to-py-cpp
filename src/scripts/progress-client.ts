@@ -10,6 +10,7 @@ import {
 import { getVisibleTracks, isTrackVisible } from "../lib/routes";
 import { getNextLesson, getPhaseForLesson, getPhaseLessons } from "../lib/course-flow";
 import { LESSONS, type Track } from "../lib/lessons";
+import { sitePath } from "../lib/site-path";
 
 const getStorage = (): StorageLike | null => {
   try {
@@ -79,7 +80,7 @@ function renderResume(state: ProgressState, goal: Goal | null): void {
     if (copy) copy.textContent = "你已经完成当前路线，可以回顾课程或重新挑战结课项目。";
     if (status) status.textContent = "全部完成";
     if (link) {
-      link.href = "/learn";
+      link.href = sitePath("/learn");
       link.innerHTML = '回顾课程路线 <span aria-hidden="true">↗</span>';
     }
     return;
@@ -92,7 +93,7 @@ function renderResume(state: ProgressState, goal: Goal | null): void {
   if (copy) copy.textContent = `${lesson.summary} 预计 ${lesson.durationMinutes} 分钟。`;
   if (status) status.textContent = state.lastViewedLessonId === lesson.id ? "接着上次学习" : "下一节推荐";
   if (link) {
-    link.href = `/learn/${lesson.track}/${lesson.slug}`;
+    link.href = sitePath(`/learn/${lesson.track}/${lesson.slug}`);
     link.innerHTML = '继续学习 <span aria-hidden="true">↗</span>';
   }
 }
@@ -265,5 +266,5 @@ document.querySelectorAll<HTMLButtonElement>("[data-copy-code]").forEach((button
 document.addEventListener("keydown", (event) => {
   if (event.key !== "/" || ["INPUT", "TEXTAREA"].includes((event.target as HTMLElement)?.tagName)) return;
   event.preventDefault();
-  window.location.href = "/search";
+    window.location.href = sitePath("/search");
 });
