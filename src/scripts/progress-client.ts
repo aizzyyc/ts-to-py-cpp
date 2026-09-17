@@ -9,6 +9,7 @@ import {
 } from "../lib/progress";
 import { getVisibleTracks, isTrackVisible } from "../lib/routes";
 import { getNextLesson, getPhaseForLesson, getPhaseLessons } from "../lib/course-flow";
+import { getActivePhaseId } from "../lib/phase-navigation";
 import { LESSONS, type Track } from "../lib/lessons";
 import { sitePath } from "../lib/site-path";
 
@@ -157,6 +158,63 @@ function render(state: ProgressState, goal: Goal | null): void {
   renderResume(state, goal);
 }
 
+function setActivePhase(phaseId: string): void {
+  document.querySelectorAll<HTMLAnchorElement>("[data-phase-nav]").forEach((link) => {
+    const active = link.dataset.phaseNav === phaseId;
+    link.classList.toggle("is-current", active);
+    if (active) link.setAttribute("aria-current", "location");
+    else link.removeAttribute("aria-current");
+  });
+}
+
+function updatePhaseNavigation(): void {
+  const phases = [...document.querySelectorAll<HTMLElement>("[data-overview-phase]")].filter(
+    (phase) => !phase.closest("[hidden]") && phase.getClientRects().length > 0,
+  );
+  if (phases.length === 0) return;
+
+  const activationLine = Math.min(240, Math.max(120, window.innerHeight * 0.28));
+  const activePhaseId = getActivePhaseId(
+    phases.map((phase) => ({ id: phase.id, top: phase.getBoundingClientRect().top })),
+    activationLine,
+  );
+  if (activePhaseId) setActivePhase(activePhaseId);
+}
+
+function initPhaseNavigation(): void {
+  const links = [...document.querySelectorAll<HTMLAnchorElement>("[data-phase-nav]")];
+  if (links.length === 0) return;
+
+  let scheduledFrame = 0;
+  const scheduleUpdate = () => {
+    if (scheduledFrame) return;
+    scheduledFrame = window.requestAnimationFrame(() => {
+      scheduledFrame = 0;
+      updatePhaseNavigation();
+    });
+  };
+
+  window.addEventListener("scroll", scheduleUpdate, { passive: true });
+  window.addEventListener("resize", scheduleUpdate);
+  window.addEventListener("hashchange", scheduleUpdate);
+  links.forEach((link) => {
+    link.addEventListener("click", () => {
+      const phaseId = link.dataset.phaseNav;
+      if (phaseId) setActivePhase(phaseId);
+
+      const sidebar = link.closest<HTMLElement>(".route-sidebar");
+      const toggle = sidebar?.querySelector<HTMLButtonElement>("[data-route-toggle]");
+      if (sidebar?.classList.contains("is-open")) {
+        sidebar.classList.remove("is-open");
+        toggle?.setAttribute("aria-expanded", "false");
+        if (toggle?.firstChild) toggle.firstChild.textContent = "打开课程路线 ";
+      }
+    });
+  });
+
+  updatePhaseNavigation();
+}
+
 function applyRouteFilter(goal: Goal | null): void {
   const visibleTracks = getVisibleTracks(goal);
   document.querySelectorAll<HTMLElement>(".route-group[data-track], .track-section[data-track]").forEach((element) => {
@@ -173,6 +231,7 @@ function applyRouteFilter(goal: Goal | null): void {
   document.querySelectorAll<HTMLElement>("[data-route-mode-copy]").forEach((element) => {
     element.textContent = goal === "ai" ? "Python 迁移基础 + AI 专项" : goal === "robotics" ? "C++ 迁移基础 + Robotics 专项" : "";
   });
+  updatePhaseNavigation();
 }
 
 function showPersistenceNotice(): void {
@@ -186,6 +245,7 @@ function showPersistenceNotice(): void {
 
 const initialGoal = getGoalFromLocation();
 applyRouteFilter(initialGoal);
+initPhaseNavigation();
 render(store.read(), initialGoal);
 showPersistenceNotice();
 

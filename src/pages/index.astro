@@ -2,6 +2,7 @@
 import BaseLayout from "../layouts/BaseLayout.astro";
 import { LESSONS } from "../lib/lessons";
 import { sitePath } from "../lib/site-path";
+import { DEBUGGING_STEPS, REVIEW_GUIDANCE, STUDY_STEPS } from "../lib/study-method";
 
 const totalLessons = LESSONS.length;
 ---
@@ -56,13 +57,33 @@ const totalLessons = LESSONS.length;
   <section class="section method-section" id="method">
     <div class="page-container">
       <div class="section-heading">
-        <div><span class="eyebrow">HOW IT WORKS</span><h2>每节课只解决一个迁移难点。</h2></div>
-        <p>不用重新读一遍编程入门。先看你认识的表达，再理解新语言为什么这样设计。</p>
+        <div><span class="eyebrow">A PRACTICAL 35 MINUTE ROUTINE</span><h2>一节课，走完一轮迁移练习。</h2></div>
+        <p>不必重学编程入门。用熟悉的 JS/TS 做参照，亲手运行新语言，再用练习和回忆确认自己真的掌握。</p>
       </div>
-      <div class="method-grid">
-        <article class="method-item"><span class="method-index">01 / TRANSLATE</span><h3>先从 JS/TS 出发</h3><p>把数组、对象、Promise、模块这些已有经验作为坐标系。</p></article>
-        <article class="method-item"><span class="method-index">02 / UNDERSTAND</span><h3>看懂关键差异</h3><p>只解释真正会影响工程结果的类型、内存、工具链和并发模型。</p></article>
-        <article class="method-item"><span class="method-index">03 / APPLY</span><h3>马上完成小练习</h3><p>每节课用一个小任务确认理解，再连接到 AI 或机器人项目。</p></article>
+      <ol class="method-grid" aria-label="一节课程的学习步骤">
+        {STUDY_STEPS.map((step) => (
+          <li class="method-item">
+            <div class="method-item-meta">
+              <span class="method-index">{step.number} / {step.label}</span>
+              <span class="method-duration">{step.minutes} 分钟</span>
+            </div>
+            <h3>{step.title}</h3>
+            <p>{step.action}</p>
+            <p class="method-output"><strong>本步产出：</strong>{step.output}</p>
+          </li>
+        ))}
+      </ol>
+      <div class="method-support-grid">
+        <section class="method-support-card method-debug">
+          <h3>卡住时，按这个顺序排查</h3>
+          <ol class="method-debug-list">
+            {DEBUGGING_STEPS.map((step) => <li>{step}</li>)}
+          </ol>
+        </section>
+        <aside class="method-support-card method-review">
+          <h3>学完后这样巩固</h3>
+          <p>{REVIEW_GUIDANCE}</p>
+        </aside>
       </div>
     </div>
   </section>

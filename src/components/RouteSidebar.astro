@@ -9,17 +9,18 @@ interface Props {
   currentTrack?: Track;
   currentLessonId?: string;
   compact?: boolean;
+  overview?: boolean;
 }
 
-const { lessons, currentTrack, currentLessonId, compact = false } = Astro.props;
+const { lessons, currentTrack, currentLessonId, compact = false, overview = false } = Astro.props;
 const tracks: Track[] = ["common", "python", "cpp"];
 ---
 
-<aside class:list={["route-sidebar", { compact }]} aria-label="学习路线">
+<aside class:list={["route-sidebar", { compact, overview }]} aria-label={overview ? "课程阶段导航" : "学习路线"}>
   <div class="sidebar-heading">
     <div>
-      <span class="eyebrow">YOUR PATH</span>
-      <h2>学习路线</h2>
+      <span class="eyebrow">{overview ? "COURSE MAP" : "YOUR PATH"}</span>
+      <h2>{overview ? "阶段导航" : "学习路线"}</h2>
     </div>
     <span class="sidebar-count" data-progress-count>0/{lessons.length}</span>
   </div>
@@ -41,25 +42,35 @@ const tracks: Track[] = ["common", "python", "cpp"];
           {isCurrentGroup && <p class="route-description">{TRACK_DESCRIPTIONS[track]}</p>}
           {phases.map((phase) => {
             const phaseLessons = getPhaseLessons(trackLessons, phase);
-            return <div class:list={["route-subgroup", { "is-project": phase.project }]} data-route-section={phase.id} data-phase-id={phase.id} data-phase-track={track}>
-              <div class="route-subgroup-title"><span>{phase.title}</span><span class="group-count">{phaseLessons.length}</span></div>
-              <ol class="lesson-list">
-                {phaseLessons.map((lesson) => (
-                  <li>
-                    <a
-                      class:list={["lesson-link", { current: lesson.id === currentLessonId }]}
-                      href={sitePath(`/learn/${lesson.track}/${lesson.slug}`)}
-                      data-lesson-id={lesson.id}
-                    >
-                      <span class="lesson-status" aria-hidden="true">{lesson.id === currentLessonId ? "→" : "○"}</span>
-                      <span class="lesson-link-copy">
-                        <span>{lesson.title}</span>
-                        <small>{lesson.durationMinutes} min</small>
-                      </span>
-                    </a>
-                  </li>
-                ))}
-              </ol>
+            return <div class:list={["route-subgroup", { "is-project": phase.project }]} data-route-section={phase.id} data-phase-id={overview ? undefined : phase.id} data-phase-track={track}>
+              {overview ? (
+                <a class:list={["phase-nav-link", { "is-project": phase.project }]} href={`#${phase.id}`} data-phase-nav={phase.id}>
+                  <span class="phase-nav-marker" aria-hidden="true"></span>
+                  <span class="phase-nav-copy">{phase.title}</span>
+                  <span class="group-count">{phaseLessons.length}</span>
+                </a>
+              ) : (
+                <>
+                  <div class="route-subgroup-title"><span>{phase.title}</span><span class="group-count">{phaseLessons.length}</span></div>
+                  <ol class="lesson-list">
+                    {phaseLessons.map((lesson) => (
+                      <li>
+                        <a
+                          class:list={["lesson-link", { current: lesson.id === currentLessonId }]}
+                          href={sitePath(`/learn/${lesson.track}/${lesson.slug}`)}
+                          data-lesson-id={lesson.id}
+                        >
+                          <span class="lesson-status" aria-hidden="true">{lesson.id === currentLessonId ? "→" : "○"}</span>
+                          <span class="lesson-link-copy">
+                            <span>{lesson.title}</span>
+                            <small>{lesson.durationMinutes} min</small>
+                          </span>
+                        </a>
+                      </li>
+                    ))}
+                  </ol>
+                </>
+              )}
             </div>
           })}
         </section>
