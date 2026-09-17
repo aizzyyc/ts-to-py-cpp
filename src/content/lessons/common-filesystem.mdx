@@ -19,6 +19,12 @@ import SolutionReveal from "../../components/SolutionReveal.astro";
 
 Node.js 的 `path.join` 已经提示了跨平台问题。Python `pathlib` 和 C++ `filesystem` 继续把路径建模为对象，并让目录、扩展名和存在性判断更清晰。迁移文件处理时，不要假设当前工作目录、斜杠、编码或权限都和 Node 开发机一致。AI 数据集通常很大，机器人日志还可能写在只读或空间有限的设备上，路径和 IO 错误必须成为明确的工程边界。
 
+## 学习目标
+
+- 能使用路径 API 而非字符串拼接表达文件位置，并识别工作目录影响。
+- 能在写入前验证路径、大小和权限，避免越出允许根目录。
+- 能设计跨平台验证样例，并说明 `resolve` 检查与符号链接之间的差异。
+
 ### 路径是数据，不是字符串拼接
 
 下面这段代码只保留同一个意图，重点观察输入边界、数据流和失败语义，而不是逐字符翻译。
@@ -67,6 +73,30 @@ Windows 路径可能包含盘符和大小写不敏感的比较，Linux 还区分
   <p>把路径、编码和错误当作接口的一部分，脚本才有资格进入 AI 或机器人流水线；可写根目录也必须由配置显式指定。</p>
 </KeyIdea>
 
+## 将外部路径约束在数据目录
+
+把用户给出的相对路径解析到固定根目录下，再检查解析结果是否仍在根内。这个例子验证普通路径与 `..` 穿越；如果威胁模型包含可被攻击者修改的符号链接，还需要在实际打开文件时使用平台适合的安全 API 并处理竞态，单次字符串检查并不能解决符号链接攻击。
+
+```js
+import path from "node:path";
+
+function isInside(root, candidate) {
+  const base = path.resolve(root);
+  const resolved = path.resolve(base, candidate);
+  const relative = path.relative(base, resolved);
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+console.log(isInside("data", "readings/a.json"), isInside("data", "../../secret.txt"));
+```
+
+预期结果是 `true false`。还要检查绝对路径、空路径、大小写与权限差异，并在 Windows 和 POSIX 环境分别运行；不要在一个系统上硬编码 `/` 分隔符或假定文件名大小写行为一致。
+
+### 验证读写边界
+
+先用临时目录进行单元测试，覆盖存在文件、缺失文件、只读目录和超大文件。写文件时优先写临时文件、完整成功后再替换目标，避免中断留下半份结果。读取外部路径时记录稳定的文件 id、大小和失败类别，不把敏感绝对路径写进面向用户的错误。
+
+若本地通过而部署失败，检查进程工作目录、容器挂载、大小写和运行账户权限。路径本身有效不代表所在卷可写；将路径解析与文件操作分开记录，能更快定位是解析错误还是 IO 错误。
+
 ## 迁移练习
 
 请完成：写一个读取 data/events.json 的函数，要求在 Windows 和 Linux 上都能运行，并拒绝跳出 data 根目录的相对路径。分别设计文件不存在、权限不足和 JSON 格式错误的报告。
@@ -81,3 +111,7 @@ Windows 路径可能包含盘符和大小写不敏感的比较，Linux 还区分
 <SolutionReveal>
   <p>把路径、编码和错误当作接口的一部分，脚本才有资格进入 AI 或机器人流水线。完成后，再用不同工作目录和不同运行用户启动一次，验证程序没有依赖开发机偶然状态。</p>
 </SolutionReveal>
+
+## 小结
+
+路径 API 负责跨平台表达，边界校验负责限定访问范围，文件写入还要考虑权限、部分写入与恢复。下一步 HTTP 课程同样把外部资源视作可能失败的边界，明确超时和响应大小。

@@ -143,6 +143,38 @@ Windows 或其他 shell 的退出码命令有所不同，但验证思想相同�
 
 构建文件还应告诉团队 warning 策略、测试入口和安装位置。不要因为某个第三方库有 warning 就关闭整个项目的 warning；必要时只对第三方 target 设置例外。一个可以从干净目录重新生成的构建，比某个成员机器上“刚好能跑”的二进制更值得信任。
 
+## 让 target 携带依赖契约
+
+CMake 工程应让每个 target 声明自己的源文件、头文件可见范围、语言标准和依赖。下面把实现放进库、把 CLI 和测试作为消费者；修改核心实现后，两个消费者都会通过 target 依赖得到正确链接，而不是在多个地方复制文件列表。
+
+```cmake
+add_library(sensor_core src/range_sensor.cpp)
+target_include_directories(sensor_core PUBLIC include)
+target_compile_features(sensor_core PUBLIC cxx_std_20)
+
+add_executable(range_check src/main.cpp)
+target_link_libraries(range_check PRIVATE sensor_core)
+
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(range_sensor_test tests/range_sensor_test.cpp)
+  target_link_libraries(range_sensor_test PRIVATE sensor_core)
+  add_test(NAME range_sensor_test COMMAND range_sensor_test)
+endif()
+```
+
+`PUBLIC` 表示消费者也需要该用法要求，`PRIVATE` 则只属于当前 target。不要用全局 include 路径或目录级编译选项把依赖藏起来；隐藏依赖经常表现为本机能构建、干净 CI 缺头文件或链接符号。
+
+### 从干净目录做完整验证
+
+在 Debug 目录配置、构建并运行 CTest；再用 Release 目录做构建和功能回归。遇到缺头文件时检查 target 的 include scope，遇到 `undefined reference` 检查实现文件是否链接进提供符号的 library，遇到 CTest 找不到测试时确认启用 `BUILD_TESTING` 并执行 `include(CTest)`。增量构建能提速，但不能替代至少一次干净配置。
+
+把编译器版本、生成器、标准版本、配置类型和依赖来源一起记录。如果只在 Release 出错，检查是否依赖了未初始化值或未定义行为；如果 Debug 与 Release 链接不同库，比较 target 的生成命令。构建成功只证明产物生成，不证明程序行为、安装路径和运行时动态库都正确。
+
+### 用失败实验检查依赖图
+
+暂时从可执行 target 移除 `sensor_core` 链接，观察链接错误；再从公共头文件依赖中移除 include 目录，观察消费者编译错误。恢复后从空 build 目录重新 configure、build、test，确认错误实验没有留下陈旧缓存。这个过程能帮助判断问题发生于配置、编译、链接、测试注册还是运行阶段。
+
 
 ## 小结与下一步
 

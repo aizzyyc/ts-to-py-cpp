@@ -30,6 +30,12 @@ import SolutionReveal from "../../components/SolutionReveal.astro";
   target={`from dataclasses import dataclass\n\n@dataclass(frozen=True)\nclass SensorReading:\n    name: str\n    value: float\n    timestamp: int`}
 /> 
 
+## 学习目标
+
+- 能区分外部 payload、通过校验的内部模型和供其他服务使用的输出 DTO。
+- 能将字段类型、单位、时间语义与业务不变量分别放在正确的转换层。
+- 能用正常值和边界值测试构造函数，拒绝 NaN、缺字段和不支持的单位。
+
 ### 用模型表达不变量
 
 Python `dataclass(frozen=True)` 可以表达一个不可变快照，但不会自动保证范围；C++ `struct` 让字段类型清楚，却仍需构造函数或解析函数校验单位；TypeScript 类型只在开发工具和编译阶段帮助你，运行时 JSON 仍可能缺字段。推荐让 `from_json`、`parse` 或构造工厂成为唯一入口，核心函数只接收已经通过检查的模型。
@@ -71,6 +77,28 @@ def parse_reading(raw: dict) -> SensorReading:
 
 外部 JSON 可以保持宽松，但进入核心逻辑前要完成一次转换。解析层检查字段存在、基本类型、时间单位和大小限制；领域层检查“温度不能低于绝对零度”这类业务规则；输出层再把内部模型转换回协议。这样的分层特别适合 AI：训练数据格式可变，模型输入张量却需要固定 shape 和 dtype。不要把原始字典或 `any` 直接传遍整个项目。
 
+## 逐层转换一条传感器读数
+
+先解析字段，再构造内部模型；不要让核心逻辑继续携带可任意增删键的原始字典。解析层检查形状，领域层检查数值是否有限和单位是否受支持，输出层才负责序列化。
+
+```js
+function parseReading(raw) {
+  if (typeof raw?.name !== "string" || !raw.name) return { ok: false, code: "missing_name" };
+  if (typeof raw.value !== "number" || !Number.isFinite(raw.value)) return { ok: false, code: "invalid_value" };
+  if (raw.unit !== "celsius") return { ok: false, code: "unsupported_unit" };
+  return { ok: true, reading: { name: raw.name, value: raw.value, unit: raw.unit } };
+}
+console.log(parseReading({ name: "room", value: 21.5, unit: "celsius" }).ok);
+```
+
+`true` 只表示结构和这里声明的规则通过，并不表示数值一定符合某个设备量程；真实项目还要把业务范围写进契约。Python `dataclass` 或 C++ `struct` 可以表示已验证值，但构造入口仍要阻止非法状态。
+
+### 可观察验证与模型边界
+
+用一份合法样例、一份缺少 `name` 的样例、一份 `NaN` 样例和一份华氏度样例运行解析器。分别断言成功模型内容和稳定错误码；尤其要确认缺字段不会被默认值 `0` 静默掩盖。排查跨语言差异时打印字段类型、单位、schema 版本和转换阶段，不要只比较格式化后的对象字符串。
+
+序列化时由 DTO 明确选择公开字段，不能直接把内部对象全部暴露出去：内部新增缓存或设备句柄，不应该意外变成线上协议的一部分。
+
 ### 迁移练习的验收点
 
 练习先画出 raw JSON、内部模型和输出消息三个节点，标出每次转换发生的位置。一个合格的实现应能说明缺失字段、非法单位、NaN 和旧版本消息分别在哪里被拒绝或转换。
@@ -85,3 +113,7 @@ def parse_reading(raw: dict) -> SensorReading:
 <SolutionReveal>
   <p>最重要的不是类名，而是边界：原始输入只在解析层出现，核心逻辑只接收已经满足约束的模型。这个习惯会让 Python 数据处理和 C++ 消息消费都更稳定，也让 schema 演进有明确落点。</p>
 </SolutionReveal>
+
+## 小结
+
+数据模型的价值是把已验证的不变量放进程序结构，而不是给任意对象换一个名字。进入错误处理与序列化主题时，继续保留原始边界、内部值和公开协议这三层区别。

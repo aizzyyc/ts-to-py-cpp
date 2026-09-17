@@ -120,6 +120,53 @@ private:
 
 节点启动阶段读取参数、打开串口和加载模型，任一失败都应有明确的退出或 degraded mode；运行阶段收到坏消息时可以丢弃当前消息并保留上一帧，但设备断开通常需要状态机重连。把异常只留在边界层，内部算法尽量使用已验证的数据对象，可以避免每一层都 catch 同一个错误。
 
+## 对预期输入错误返回可检查结果
+
+不是所有失败都需要异常。用户输入的数字格式错误是预期分支，可以用 `std::from_chars` 得到可测试的错误类别；这样不会把异常用于常规控制流，也不会误收 `12abc` 这类尾随字符。下面按 C++17 的整数接口展示检查顺序：
+
+```cpp
+#include <charconv>
+#include <string_view>
+#include <system_error>
+
+enum class ParseError { None, Empty, Invalid, OutOfRange, Trailing, Negative };
+struct ParseResult { int value{}; ParseError error{ParseError::None}; };
+
+ParseResult parseLimit(std::string_view text) {
+  if (text.empty()) return {0, ParseError::Empty};
+  int value{};
+  const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
+  if (ec == std::errc::invalid_argument) return {0, ParseError::Invalid};
+  if (ec == std::errc::result_out_of_range) return {0, ParseError::OutOfRange};
+  if (end != text.data() + text.size()) return {0, ParseError::Trailing};
+  if (value < 0) return {0, ParseError::Negative};
+  return {value, ParseError::None};
+}
+```
+
+调用方可以按 `ParseError` 提示字段、拒绝配置或回到命令行，而不需要解析错误字符串。若失败来自磁盘、设备 SDK 或内存分配，应结合对应 API 的错误约定处理；不要将所有来源强行套进这个解析枚举。
+
+### 编译运行与边界验证
+
+为 `""`、`"abc"`、`"12abc"`、负数、合法零和超出 `int` 范围的十进制文本分别断言错误类别/结果。对有符号和无符号互转使用显式范围检查；把字符串截断、部分解析和数值越界视为不同错误。编译时启用 warning，并在测试中确认每种错误都被调用方处理，不能只确认 parser 返回了某个状态。
+
+### 异常传播与资源回收
+
+异常穿过栈帧时，局部 RAII 对象仍会按作用域析构；因此文件、锁和临时缓冲区应优先用作用域管理，而不是手写多个 `close()` 分支。catch 顺序由具体到一般，只在最接近恢复决策的位置捕获；无法恢复的错误带上下文传到应用边界并终止当前操作。析构函数不应抛出第二个异常，硬件安全停机等动作应由显式状态转换完成。
+
+### 运行验证：错误类别必须被调用方处理
+
+为 parser 写断言时，同时检查成功值与错误枚举：`parseLimit("12")` 得到值 12，`parseLimit("12x")` 是尾随字符，空串与超范围分别得到不同错误。然后在 CLI 层把无效输入映射成参数退出码，在机器人节点层映射成明确 fault 状态。测试目标是验证“每个失败都有负责的下一步”，而不只是确认函数没崩溃。
+
+| 失败场景 | 表达方式候选 | 由谁恢复 |
+| --- | --- | --- |
+| 查询暂时没有样本 | `optional` | 调用方等待下一帧或跳过 |
+| 用户配置格式错误 | 结果类型或异常 | CLI 提示修复字段 |
+| 设备返回可重试状态码 | 错误码 | 设备适配器按策略重试 |
+| 内部不变量被破坏 | 异常/终止当前操作 | 应用边界记录并隔离 |
+
+同一函数不应同时把“没有样本”伪装成 0、把坏输入转成空对象、再吞掉设备错误。选择的表达方式应让调用方不能无意忽略；需要跨多个语言进程时，把错误类别序列化成稳定 code，不要传异常堆栈当协议。
+
 <KeyIdea title="先定义失败语义，再选择表达方式">
   <p>没有结果可以是 optional，预期且可分支的设备状态可以是错误码，需要跨多层传播的意外失败可以是异常；越界和 use-after-free 则不是可捕获的业务失败。</p>
 </KeyIdea>

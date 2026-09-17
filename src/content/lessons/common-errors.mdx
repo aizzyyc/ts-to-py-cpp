@@ -30,6 +30,12 @@ JS/TS 开发者通常熟悉 `throw`、`try/catch` 和 Promise rejection。迁移
   target={`def load_config(path: str) -> dict:\n    try:\n        return json.loads(Path(path).read_text())\n    except (OSError, json.JSONDecodeError) as error:\n        raise ConfigError(path) from error`}
 /> 
 
+## 学习目标
+
+- 能区分输入错误、可恢复依赖错误和程序内部缺陷，并选择适当的返回方式。
+- 能把异常捕获放在有能力处理错误的边界，避免吞错和重复记录。
+- 能设计可查询但不泄露敏感信息的结构化日志字段。
+
 ### 一个可重复的排错顺序
 
 先记录输入的身份，不要记录密码、token 或完整用户数据；找到第一个发生错误的边界，而不是只看最外层堆栈；区分可恢复错误和程序错误；最后给错误增加稳定的类型或错误码。Python 可以在 `except` 中用 `raise ... from error` 保留原因，C++ 可以用枚举错误码和 `std::error_code`，JS/TS 则可在 `cause` 中保留原异常。
@@ -64,6 +70,27 @@ function describe(failure: Failure): string {
 
 调试器适合回答“这一行的变量是什么”，日志适合回答“这个问题在真实环境发生过多少次”。进入 AI 和机器人项目后，两者都需要：本地调试靠断点，现场定位靠结构化事件。
 
+## 把错误变成调用方能行动的结果
+
+在模块边界把低层错误映射成稳定类别，保留原始原因用于内部诊断，但只向调用方暴露安全且可操作的信息。下面展示同步纯逻辑；网络、磁盘或设备错误还需要在真正执行副作用的位置分类。
+
+```js
+function toPublicError(error) {
+  if (error.code === "INVALID_INPUT") return { status: 400, code: "invalid_input" };
+  if (error.code === "TIMEOUT") return { status: 503, code: "dependency_timeout" };
+  return { status: 500, code: "internal_error" };
+}
+console.log(toPublicError({ code: "TIMEOUT" }));
+```
+
+预期只返回 `dependency_timeout`，而不是内部堆栈。Python 可以在边界捕获特定异常类型；C++ 可检查错误码或结果类型。不要用宽泛的 `catch` 把所有情况伪装成空结果，否则上游会把故障当正常数据继续处理。
+
+### 验证异常路径和日志字段
+
+构造一组输入分别触发校验失败、依赖超时和未知错误，检查调用方看到的状态是否稳定、内部是否只记录一次、request id 是否贯穿链路、日志中是否没有 token 和原始私密数据。重试应只由知道操作幂等性的一层决定；通用异常处理器不应自动无限重试。
+
+排查重复日志时沿调用栈找多个 catch 层，保留一个负责记录上下文的边界，其余层只转换或向上抛出。排查错误被吞时，给结果增加明确状态并要求调用方处理，避免使用 `null`、空数组或默认零值掩盖失败。
+
 ## 迁移练习
 
 请完成：为一个模型文件加载失败设计错误类型、日志字段和入口行为，区分下载超时、文件格式错误与模型内部不变量失败。
@@ -78,3 +105,7 @@ function describe(failure: Failure): string {
 <SolutionReveal>
   <p>把“错误信息”设计成机器也能读取的事件，后续才能统计失败率、区分网络问题和模型问题，并在不改变业务代码的情况下接入监控。</p>
 </SolutionReveal>
+
+## 小结
+
+为错误选择异常、返回值或状态码时，应从失败是否预期、调用方能否恢复和需要保留什么上下文出发。只在掌握处理动作的边界记录一次日志，稳定错误类别，再把最小失败样例加入回归测试。

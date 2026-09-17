@@ -19,6 +19,12 @@ import SolutionReveal from "../../components/SolutionReveal.astro";
 
 npm scripts 经常把多个工具串在一起。进入 Python 和 C++ 后，进程的标准流、退出码和信号会直接影响数据管线和容器编排。把 CLI 当成 API，就要像设计 HTTP 接口一样定义输入格式、输出格式、退出码、超时和终止行为。父进程不能只看“子进程结束了”，还要知道它是成功退出、被信号终止，还是输出了不完整结果。
 
+## 学习目标
+
+- 能定义子进程的标准输入、标准输出、标准错误和退出码契约。
+- 能处理超时、取消、输出上限和子进程回收，避免留下孤儿进程。
+- 能区分机器可解析输出与人类诊断，并在跨语言流水线中稳定传递错误。
+
 ### 命令行程序也是一种 API
 
 下面这段代码只保留同一个意图，重点观察输入边界、数据流和失败语义，而不是逐字符翻译。
@@ -76,6 +82,28 @@ if __name__ == "__main__":
   <p>稳定的进程边界能把 JS/TS、Python 和 C++ 工具组合成一条可靠流水线；stdout、stderr、退出码和生命周期都属于这份 API。</p>
 </KeyIdea>
 
+## 用退出码判断结果，而不是猜标准输出
+
+父进程应把“命令完成”与“命令成功”区分开：子进程可以正常结束但返回非零；也可能在超时后没有机会输出完整 JSON。先约定 stdout 只包含数据、stderr 只包含诊断，再把退出码映射成调用方可处理的状态。
+
+```js
+function interpretExit(code, signal) {
+  if (signal) return { ok: false, kind: "terminated", signal };
+  if (code === 0) return { ok: true };
+  if (code === 2) return { ok: false, kind: "invalid_input" };
+  return { ok: false, kind: "child_failed", code };
+}
+console.log(interpretExit(2, null));
+```
+
+预期得到 `invalid_input`，而不是把 stderr 文本当作唯一协议。标准错误可能本地化或随版本变化，因此业务判断应依据稳定退出码和结构化 stdout。启动进程时使用参数数组并关闭不必要的 shell 解释，避免字符串拼接导致注入。
+
+### 超时与回收验证
+
+用一个立即成功的子进程、一个返回非零的子进程、一个超时子进程和一个输出超限进程验证父进程行为。超时后终止子进程并等待其退出；取消后关闭管道，确认不会继续堆积后台任务。为 stdout/stderr 设字节上限，防止异常程序无限输出耗尽内存。
+
+排查“命令卡住”时检查父进程是否只读取 stdout 却未排空 stderr，管道缓冲区可能因此被填满；再检查当前工作目录、环境变量、信号和平台差异。记录 pid、命令名、运行时长和退出类别，不记录秘密参数。
+
 ## 迁移练习
 
 请完成：设计一个 CLI，使它把结果写 stdout，把日志写 stderr，并在输入无效、子进程超时和成功时返回不同退出码。说明父进程如何回收子进程。
@@ -90,3 +118,7 @@ if __name__ == "__main__":
 <SolutionReveal>
   <p>稳定的进程边界能把 JS/TS、Python 和 C++ 工具组合成一条可靠流水线。完成后，请用一条 JSONL 管道测试 stdout 可解析、stderr 不污染结果，以及超时后没有遗留子进程。</p>
 </SolutionReveal>
+
+## 小结
+
+子进程是独立故障边界：参数、流、退出码、超时和回收都属于公开契约。将它当成 API 管理，JS/TS、Python 和 C++ 工具才可以可靠地组合成流水线。

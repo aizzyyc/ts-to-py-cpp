@@ -19,6 +19,10 @@ import SolutionReveal from "../../components/SolutionReveal.astro";
 
 JS/TS 项目常用 HTTP 或 WebSocket；机器人系统还会在节点间使用 ROS 2、Unix domain socket、共享内存或设备驱动 API。选择连接方式要先定义消息大小、频率、允许延迟、断连动作和安全边界。网络字节流没有消息边界，进程退出也不会自动通知业务状态，协议必须把这些故障写出来。
 
+## 学习目标
+
+你将学会区分 request/response、stream 和共享内存；设计版本、长度和序号字段；处理 partial read、timeout、断连和重连；把 Web 控制台、网关和 ROS 2 节点的权限、生命周期和安全动作写进协议。
+
 ### 请求、流和共享内存的取舍
 
 <CompareCode
@@ -62,10 +66,6 @@ bool valid_header(const FrameHeader& header, std::size_t max_payload) {
 ### 编译、链接和运行时排错
 
 `undefined reference` 先确认网络库 target 和平台库链接；编译过却收不到消息，检查监听地址、端口、协议版本和 framing。连接成功后偶发解析错误，打印 sequence、payload_size 和实际读取字节数。运行时超时要区分对端未发送、读取被信号打断和本地线程饥饿；不要无限重试，否则断连会拖死控制循环。
-
-### 学习目标
-
-你将学会区分 request/response、stream 和共享内存；设计版本、长度和序号字段；处理 partial read、timeout、断连和重连；把 Web 控制台、网关和 ROS 2 节点的权限、生命周期和安全动作写进协议。
 
 ### 解析器先校验长度
 
@@ -143,6 +143,54 @@ bool acceptable(const Command& command, std::int64_t now_ns) {
 ```
 
 用固定的 `now_ns` 测试刚好未过期、刚好过期、重复序号、NaN 和超范围速度，预期只有合法命令进入控制队列。编译时打开 `-Wall -Wextra -Wconversion`，把浮点到整数或有符号/无符号比较的警告当成协议审查线索。运行集成测试时模拟半包、延迟和重连，验证故障会回到安全状态；不要用 `sleep` 代替明确的时钟和超时输入。
+
+## 用解析状态区分半包与非法帧
+
+流式读取一次可能只拿到头部的一部分，也可能拿到多帧拼接后的字节。解析器应返回三种明确结果：还需要更多字节、得到一帧、输入非法；不能把“不完整”误报为“连接坏了”，也不能把非法长度当作等待更多数据。下面展示一个小端 32 位长度头的检查顺序，生产协议还应固定字节序、版本和校验策略。
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+enum class FrameState { NeedMore, Ready, Invalid };
+struct FrameView { const std::byte* data{}; std::size_t size{}; };
+
+FrameState inspectFrame(const std::vector<std::byte>& bytes,
+                        std::size_t maxPayload, FrameView& view) {
+  if (bytes.size() < 4) return FrameState::NeedMore;
+  const auto b0 = std::to_integer<std::uint8_t>(bytes[0]);
+  const auto b1 = std::to_integer<std::uint8_t>(bytes[1]);
+  const auto b2 = std::to_integer<std::uint8_t>(bytes[2]);
+  const auto b3 = std::to_integer<std::uint8_t>(bytes[3]);
+  const std::uint32_t length = static_cast<std::uint32_t>(b0)
+      | (static_cast<std::uint32_t>(b1) << 8)
+      | (static_cast<std::uint32_t>(b2) << 16)
+      | (static_cast<std::uint32_t>(b3) << 24);
+  if (length > maxPayload) return FrameState::Invalid;
+  if (bytes.size() - 4 < length) return FrameState::NeedMore;
+  view = {bytes.data() + 4, length};
+  return FrameState::Ready;
+}
+```
+
+解析顺序先确保有完整头，再检查上限，最后才比较载荷字节数；由于先检查 `bytes.size() >= 4`，减去头长不会下溢。成功返回的 `FrameView` 借用 vector 内存，调用方不能在消费完 view 前清空或扩容底层缓冲区。
+
+### 运行验证：固定字节样例
+
+准备少于 4 字节的输入、完整头但不完整载荷、长度超过上限和完整合法帧。预期分别为 `NeedMore`、`NeedMore`、`Invalid`、`Ready`；合法 payload 长度为 0 时也要明确协议是否允许空帧。测试每一步解析后保留未消费尾部，确认下一个 frame 的字节不会被丢弃。
+
+若出现间歇性错帧，记录连接 id、已读字节数、解析状态和缓冲区上限，再用相同字节序列回放。不要直接把网络分块边界当作消息边界；TCP 只提供有序字节流，发送端一次 write 与接收端一次 read 并不一一对应。
+
+### 写侧也需要处理 partial write
+
+发送端的 write/send 也可能只接受部分字节。调用方要从已写偏移继续发送剩余部分，并处理 `EINTR`、`EAGAIN`、对端关闭和 deadline；不能每次都从 buffer 起点重发，否则接收端会看到重复前缀。非阻塞 socket 遇到暂时不可写，应等待可写事件并检查取消/超时，而不是忙循环占满 CPU。
+
+把读写状态机拆成“准备帧、发送偏移、等待可写、接收累积、解析完整帧、消费后回收”几个阶段，每个阶段都有一个超时和关闭出口。对大 payload 再定义最大并发帧数与背压策略；只限制单帧大小仍挡不住许多合法帧同时排队耗尽内存。
+
+### 端到端故障演练
+
+用 fake peer 分别模拟延迟头部、断在 payload 中间、重复 sequence、超限 payload 和写入被打断。验证客户端不会交付半帧、不会无限重试，并在断连后将连接状态置为不可用；机器人控制面还应验证旧命令过期后转入预定安全状态。保留字节 fixture 和固定时钟，让以后调整协议或缓冲区时可以离线回放。
 
 ## 小结补充
 

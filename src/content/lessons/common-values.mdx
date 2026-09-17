@@ -32,6 +32,12 @@ const readings: Reading[] = [{ value: 23, unit: "°C" }];`}
 reading = readings[0]`}
 />
 
+## 学习目标
+
+- 能区分对象形状、通用容器和领域模型，知道类型声明何时只在编译期有效。
+- 能在外部数据边界校验键、元素类型、数值有限性和集合大小。
+- 能为临时值与跨模块数据分别选择轻量对象或显式模型，并说明复制/借用关系。
+
 ### 形状、容器和所有权
 
 把 `Reading[]` 迁成 Python 时，可以先用 `list[Reading]` 表示集合，再决定 `Reading` 是字典、`dataclass` 还是验证模型；迁成 C++ 时，`std::vector<Reading>` 说明元素类型固定，但仍需决定函数接收值、`const&` 还是移动值。跨模块接口尽量接收“谁拥有这份数据”清楚的类型，而不是传一个可以任意改写的万能对象。
@@ -60,6 +66,31 @@ def positive_values(readings: list[Reading]) -> list[float]:
   <p>探索性脚本可以从 <code>dict</code> 开始；跨模块、跨线程或要长期维护的数据，应该尽早考虑显式类型、校验和不可变边界。</p>
 </KeyIdea>
 
+## 从松散对象列表构造可信集合
+
+一个数组只保证“有若干元素”，并不保证每个元素都有正确字段。先校验输入形状，再生成内部使用的值；遇到错误要报告索引和字段，不能悄悄丢弃异常元素或把字符串强转成数字。
+
+```js
+function parseReadings(raw) {
+  if (!Array.isArray(raw)) return { ok: false, code: "expected_array" };
+  const readings = [];
+  for (const [index, item] of raw.entries()) {
+    if (!Number.isFinite(item?.value)) return { ok: false, code: "invalid_value", index };
+    readings.push({ value: item.value });
+  }
+  return { ok: true, readings };
+}
+console.log(parseReadings([{ value: 2 }, { value: "3" }]));
+```
+
+预期第二个元素以 `index: 1` 报错。空数组可以是合法输入，但要由业务规则决定；不要把空、缺失和解析失败自动合并。Python 可用类型提示和 dataclass 表达已校验集合，C++ 可用 `std::vector<Reading>`，但边界检查仍不可省略。
+
+### 运行验证：选择形状还是模型
+
+仅在一个函数内使用的临时数据可保留为轻量对象；跨文件、进程或语言传递的结构要明确字段和版本；承载业务规则与不变量的实体则应通过受控构造避免非法状态。检查对象是否会被多个调用方持有，决定需要复制、只读视图还是共享所有权。
+
+验证集合时覆盖空输入、缺字段、数值字符串、`NaN`、超大数组和重复引用。对图像/张量等大元素，先估算总字节数，再决定是否复制、流式消费或用类型化数组；不要为了统一 API 把巨型数据反复转换。
+
 ## 迁移练习
 
 <Exercise
@@ -72,3 +103,7 @@ def positive_values(readings: list[Reading]) -> list[float]:
 <SolutionReveal>
   <p>集合语法只是表面。真正要迁移的是对数据边界的判断：临时脚本追求表达力，工程模块还要追求契约、校验和可观察性；当输入规模增长时，再用测量结果决定复制还是移动。</p>
 </SolutionReveal>
+
+## 小结
+
+对象形状是起点，可信内部集合需要验证，长期契约需要版本与单位，不变量模型还要控制构造。迁移到 Python 或 C++ 时，先说清值的用途和所有权，再选语言类型。

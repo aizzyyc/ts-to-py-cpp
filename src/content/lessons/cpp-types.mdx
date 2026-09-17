@@ -188,6 +188,76 @@ struct 字段顺序会影响内存布局和对齐。一个包含 bool、double �
 
 设备 SDK 可能给出原始字节、整数 tick 或 float，规划器却需要米、秒和明确质量。适配层负责转换和校验，算法层接收稳定的 Reading 或消息结构。类型设计越清楚，越容易在没有真实硬件时构造 fake 数据，也越容易在回放中复现一次异常读数。
 
+## 把单位转换做成可验证边界
+
+类型名可以让单位更醒目，但外部传感器仍可能给出 NaN、负值或超出目标整数范围的数。转换必须先验证再 cast；直接把 `double` 转为整数不仅会丢失小数，越界转换也不能当作有效的饱和策略。下面把米转换为非负毫米，并通过 `optional` 表示拒绝。
+
+```cpp
+#include <cassert>
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <optional>
+
+std::optional<std::int32_t> metersToMillimeters(double meters) {
+  if (!std::isfinite(meters) || meters < 0.0) return std::nullopt;
+  const double rounded = std::round(meters * 1000.0);
+  if (rounded > static_cast<double>(std::numeric_limits<std::int32_t>::max())) {
+    return std::nullopt;
+  }
+  return static_cast<std::int32_t>(rounded);
+}
+
+int main() {
+  assert(metersToMillimeters(1.25) == 1250);
+  assert(!metersToMillimeters(-0.1));
+  assert(!metersToMillimeters(std::numeric_limits<double>::quiet_NaN()));
+}
+```
+
+### 编译运行与边界实验
+
+将 `1.25` 改成 `1.251`，按当前“最近整数毫米”策略结果为 `1251`；再试负值、NaN、正无穷和超大有限值，均应拒绝。若传感器分辨率要求截断而非四舍五入，必须修改策略和测试名称，不能依赖某个编译器的偶然表达式结果。还要检查 `meters * 1000` 的范围与目标类型上限，单位换算不能靠注释补救。
+
+此处返回 `optional<int32_t>` 只回答“有没有可用转换值”；若调用方需要知道是 NaN、负数还是超范围，应改用带错误类别的结果类型。代码边界选型要跟恢复动作一致，日志记录原始来源和错误类别即可，不必重复打印整帧数据。
+
+### 从示例扩展到消息契约
+
+把单位编码进字段名或强类型包装，可减少把米误当厘米的机会；再用枚举表达质量状态，避免多个含义不同的整数共用一个 `int`。对外序列化仍要写明数值宽度、单位和版本，不能直接复制 struct 的内存布局。构建后先跑断言，再用 sanitizer 和编译器 warning 检查整数转换；warning 需要逐项解释，不应靠关闭选项消失。
+
+## 用返回类型表达“没有可用平均值”
+
+继续完成前面的传感器练习：过滤质量无效或非有限读数，统计有效样本后再除法。温度可以合法为负，因此不能把“负数”一概判为坏值；业务范围应按具体传感器契约设定。空集合或全是坏状态时则确实没有平均值，应该返回 `std::nullopt`，而不是伪造 `0.0`。
+
+```cpp
+#include <cmath>
+#include <cstddef>
+#include <optional>
+#include <vector>
+
+enum class Quality { Good, Stale, Invalid };
+struct TemperatureReading { double celsius; Quality quality; };
+
+std::optional<double> averageGoodTemperature(
+    const std::vector<TemperatureReading>& readings) {
+  double sum = 0.0;
+  std::size_t count = 0;
+  for (const auto& reading : readings) {
+    if (reading.quality != Quality::Good || !std::isfinite(reading.celsius)) continue;
+    sum += reading.celsius;
+    ++count;
+  }
+  if (count == 0) return std::nullopt;
+  return sum / static_cast<double>(count);
+}
+```
+
+### 运行验证：空值、状态与边界
+
+用 `20°C Good`、`-2°C Good` 与 `100°C Stale` 验证结果为 `9.0`；只传 Stale 样本和空 vector 时都应无值；Good 状态下的 NaN 应被忽略或在更上游拒绝。真实应用需决定无效样本是“跳过并计数”还是“整批失败”，这取决于算法是否允许部分观测，不能只靠 `optional` 决定。
+
+此例也解释了为什么单独返回 `double` 不够：0 可能是真实平均值，也可能代表输入为空。增加状态类型后，调用方必须显式处理没有结果的分支，代码审查就能看到它，而不是在控制流程中悄悄继续。
+
 <KeyIdea title="类型保护边界，运行时校验保护现实">
   <p>编译器能检查表达式和参数类型，不能检查传感器是否被拔掉、单位是否标错或数值是否为 NaN。把两层检查都放在消息进入算法之前。</p>
 </KeyIdea>

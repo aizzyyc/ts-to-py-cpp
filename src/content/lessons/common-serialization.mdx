@@ -21,6 +21,12 @@ JS/TS 很容易把对象 `JSON.stringify` 后发送出去，但 Python 和 C++ �
 
 跨语言尤其要警惕时间戳和大整数。JavaScript 的安全整数范围有限，Python 整数可以更大，C++ 的 `int64_t` 也不等于任意 JSON number 的精确表示；AI 分数通常可以用明确的小数约束，设备 id 可能应作为字符串传输。不要把“解析成功”当作“协议有效”。
 
+## 学习目标
+
+- 能为消息定义版本、时间单位、数值范围、缺失值和编码方式。
+- 能说明新增字段、字段改名和单位变化分别如何兼容或升级。
+- 能使用固定 golden message 对比 JS/TS、Python、C++ 的解析结果。
+
 ### 数据格式是团队之间的长期协议
 
 下面这段代码只保留同一个意图，重点观察输入边界、数据流和失败语义，而不是逐字符翻译。
@@ -73,6 +79,29 @@ def decode_event(payload: bytes) -> dict:
   <p>把数据协议当产品来维护，才能让多语言组件持续演进；兼容性需要版本、默认值和可回放的样例共同保证。</p>
 </KeyIdea>
 
+## 从原始 JSON 到版本化消息
+
+序列化前先定义一个所有消费者都能解释的契约。数字字段需要明确有限性和范围，时间戳要明确时区与单位；`null`、字段缺失和数值零不能默认视为同一含义。解析后将外部格式转换为内部模型，避免让 JSON 细节扩散到业务代码。
+
+```js
+function decode(text) {
+  const message = JSON.parse(text);
+  if (message.version !== 1) return { ok: false, code: "unsupported_version" };
+  if (!Number.isSafeInteger(message.timestampMs)) return { ok: false, code: "invalid_timestamp" };
+  if (message.unit !== "celsius" || !Number.isFinite(message.value)) return { ok: false, code: "invalid_measurement" };
+  return { ok: true, value: { timestampMs: message.timestampMs, unit: message.unit, value: message.value } };
+}
+console.log(decode('{"version":1,"timestampMs":1760000000000,"unit":"celsius","value":21.5}').ok);
+```
+
+合法样例应返回 `true`；未知版本、毫秒/秒错用、`NaN` 语义或单位不匹配都应在边界失败。JSON 本身不支持 NaN 标准数值，不能因为某语言解析器接受扩展值就把它纳入跨语言协议。
+
+### 版本升级与兼容验证
+
+新增可选字段时，旧消费者通常可忽略、新消费者可给出安全默认值；改变现有字段含义或单位则应升级版本并提供显式转换。为每个支持版本保留 golden message，运行三种语言的解析器并比较规范化后的字段、时间和精度。超出 JavaScript 安全整数范围的数值不要直接跨 JSON 当普通整数传输，可改用字符串或明确的二进制表示。
+
+排查不一致时先比较原始字节、字符编码、字段缺失策略、整数精度与浮点舍入，再检查网络。若只保存当前版本样例，旧消息回归会无声丢失，因此 fixture 应与 schema 版本共同维护。
+
 ## 迁移练习
 
 请完成：为传感器消息设计 version、timestamp、unit 和 value 字段，并写出旧消费者遇到新消息、新消费者遇到旧消息时的行为；再选择 JSON 或二进制并说明理由。
@@ -87,3 +116,7 @@ def decode_event(payload: bytes) -> dict:
 <SolutionReveal>
   <p>把数据协议当产品来维护，才能让多语言组件持续演进。完成后，请用固定消息在 JS/TS、Python 和 C++ 之间往返一次，比较字段、时间和数值是否保持一致。</p>
 </SolutionReveal>
+
+## 小结
+
+序列化格式是长期协议，版本、单位、范围和缺失语义必须写明并用跨语言样例锁定。传输格式可以更换，只有显式版本转换和回放测试能保护已有消费者。
