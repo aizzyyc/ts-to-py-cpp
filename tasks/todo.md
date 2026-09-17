@@ -196,7 +196,7 @@
 - [x] 深化 `cpp-types`、`cpp-networking`、`cpp-toolchain`、`cpp-exceptions`、`cpp-stl`
 - [x] 复核课程先修关系、语言迁移线索、代码验证与结课衔接
 - [x] 运行课程测试、类型/内容检查与生产构建
-- [ ] 推送 GitHub 并确认最新课程页面已完成部署
+- [x] 推送 GitHub 并确认最新课程页面已完成部署
 
 ### 本轮课程优化 Review
 
@@ -205,4 +205,5 @@
 - 新增内容质量回归检查，并修正正文长度算法误把 C++ 比较符当作 MDX 标签的问题。
 - 验证：`npm test` 33 项通过；`npm run check` 0 errors/warnings/hints；`npm run build` 生成 95 个页面；`git diff --check` 通过。
 - C++ 代码片段完成静态核对；当前工作环境没有可用 C++ 编译器，因此本轮没有声称这些教学片段经过本机编译执行。
-- GitHub 推送与 Pages 部署待完成。
+- GitHub Pages 工作流 `35168599898` 成功；共用并发课和 C++ 类型课线上返回 HTTP 200，并包含本轮新增内容。
+- Pages workflow 对 Node.js 20 的弃用提示来自 action 版本兼容告警，不影响本次构建或发布成功。
