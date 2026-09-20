@@ -11,7 +11,7 @@ interface Props {
 const { sourceLabel, sourceLanguage, source, targetLabel, targetLanguage, target } = Astro.props;
 ---
 
-<section class="code-compare" aria-label={`${sourceLabel} 与 ${targetLabel} 代码对照`}>
+<section class="code-compare" data-lesson-section="code" aria-label={`${sourceLabel} 与 ${targetLabel} 代码对照`}>
   <div class="compare-header">
     <span class="eyebrow">TRANSLATION LENS</span>
     <span class="compare-hint">同一个意图，两种工程表达</span>

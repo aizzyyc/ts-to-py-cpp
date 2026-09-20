@@ -1,7 +1,7 @@
 ---
 import type { LessonMeta, Track } from "../lib/lessons";
 import { TRACK_DESCRIPTIONS, TRACK_LABELS } from "../lib/lessons";
-import { getCoursePhases, getPhaseLessons } from "../lib/course-flow";
+import { getCoursePhases, getPhaseForLesson, getPhaseLessons } from "../lib/course-flow";
 import { sitePath } from "../lib/site-path";
 
 interface Props {
@@ -14,6 +14,8 @@ interface Props {
 
 const { lessons, currentTrack, currentLessonId, compact = false, overview = false } = Astro.props;
 const tracks: Track[] = ["common", "python", "cpp"];
+const currentLesson = currentLessonId ? lessons.find((lesson) => lesson.id === currentLessonId) : undefined;
+const currentPhaseId = currentLesson ? getPhaseForLesson(currentLesson)?.id : undefined;
 ---
 
 <aside class:list={["route-sidebar", { compact, overview }]} aria-label={overview ? "课程阶段导航" : "学习路线"}>
@@ -42,16 +44,17 @@ const tracks: Track[] = ["common", "python", "cpp"];
           {isCurrentGroup && <p class="route-description">{TRACK_DESCRIPTIONS[track]}</p>}
           {phases.map((phase) => {
             const phaseLessons = getPhaseLessons(trackLessons, phase);
-            return <div class:list={["route-subgroup", { "is-project": phase.project }]} data-route-section={phase.id} data-phase-id={overview ? undefined : phase.id} data-phase-track={track}>
-              {overview ? (
+            return overview ? (
+              <div class:list={["route-subgroup", { "is-project": phase.project }]} data-route-section={phase.id} data-phase-track={track}>
                 <a class:list={["phase-nav-link", { "is-project": phase.project }]} href={`#${phase.id}`} data-phase-nav={phase.id}>
                   <span class="phase-nav-marker" aria-hidden="true"></span>
                   <span class="phase-nav-copy">{phase.title}</span>
                   <span class="group-count">{phaseLessons.length}</span>
                 </a>
-              ) : (
-                <>
-                  <div class="route-subgroup-title"><span>{phase.title}</span><span class="group-count">{phaseLessons.length}</span></div>
+              </div>
+            ) : (
+                <details class:list={["route-subgroup", "route-subgroup-details", { "is-project": phase.project }]} data-route-section={phase.id} data-phase-id={phase.id} data-phase-track={track} open={phase.id === currentPhaseId}>
+                  <summary class="route-subgroup-title"><span>{phase.title}</span><span class="group-count">{phaseLessons.length}</span><span class="phase-toggle" aria-hidden="true">+</span></summary>
                   <ol class="lesson-list">
                     {phaseLessons.map((lesson) => (
                       <li>
@@ -59,6 +62,7 @@ const tracks: Track[] = ["common", "python", "cpp"];
                           class:list={["lesson-link", { current: lesson.id === currentLessonId }]}
                           href={sitePath(`/learn/${lesson.track}/${lesson.slug}`)}
                           data-lesson-id={lesson.id}
+                          aria-current={lesson.id === currentLessonId ? "page" : undefined}
                         >
                           <span class="lesson-status" aria-hidden="true">{lesson.id === currentLessonId ? "→" : "○"}</span>
                           <span class="lesson-link-copy">
@@ -69,9 +73,8 @@ const tracks: Track[] = ["common", "python", "cpp"];
                       </li>
                     ))}
                   </ol>
-                </>
-              )}
-            </div>
+                </details>
+            );
           })}
         </section>
       );

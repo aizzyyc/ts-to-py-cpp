@@ -17,15 +17,34 @@ test("learn route and course catalog use separate responsive layout columns", ()
 
 test("learn page exposes resume and phase progress hooks", async () => {
   const learnPage = await readFile(new URL("../src/pages/learn/index.astro", import.meta.url), "utf8");
+  const client = await readFile(new URL("../src/scripts/progress-client.ts", import.meta.url), "utf8");
   assert.match(learnPage, /ContinueLearning/);
   assert.match(learnPage, /data-phase-progress/);
   assert.match(learnPage, /data-phase-bar/);
+  assert.match(learnPage, /data-goal-switch/);
+  assert.match(client, /const visibleCompletedCount/);
+  assert.match(client, /visibleCompletedCount === 0/);
+  assert.match(client, /推荐开始/);
+  assert.match(client, /已浏览 · 继续学习/);
+});
+
+test("learning overview lets learners switch between focused goals", async () => {
+  const learnPage = await readFile(new URL("../src/pages/learn/index.astro", import.meta.url), "utf8");
+  assert.match(learnPage, /data-goal-switch="ai"/);
+  assert.match(learnPage, /data-goal-switch="robotics"/);
+  assert.match(learnPage, /goal=ai/);
+  assert.match(learnPage, /goal=robotics/);
 });
 
 test("lesson route sidebar exposes the same phase structure", async () => {
   const sidebar = await readFile(new URL("../src/components/RouteSidebar.astro", import.meta.url), "utf8");
+  const client = await readFile(new URL("../src/scripts/progress-client.ts", import.meta.url), "utf8");
   assert.match(sidebar, /getCoursePhases/);
   assert.match(sidebar, /data-phase-id/);
+  assert.match(sidebar, /<details/);
+  assert.match(sidebar, /open=\{phase\.id === currentPhaseId\}/);
+  assert.match(sidebar, /aria-current=\{lesson\.id === currentLessonId \? "page"/);
+  assert.match(client, /scrollIntoView\(\{ block: "nearest" \}\)/);
 });
 
 test("lesson detail includes phase context and completion flow", async () => {
@@ -136,6 +155,38 @@ test("lesson previous and next links keep arrows beside their titles and stack o
   assert.doesNotMatch(linkRule, /justify-content:\s*space-between/);
   assert.match(nextRule, /justify-content:\s*flex-end/);
   assert.match(narrowScreenRules, /\.lesson-nav-links\s*\{[^}]*grid-template-columns:\s*1fr/s);
+});
+
+test("lesson overview exposes real anchors and scroll-synced active sections", async () => {
+  const page = await readFile(new URL("../src/pages/learn/[track]/[slug].astro", import.meta.url), "utf8");
+  const compare = await readFile(new URL("../src/components/CompareCode.astro", import.meta.url), "utf8");
+  const exercise = await readFile(new URL("../src/components/Exercise.astro", import.meta.url), "utf8");
+  const solution = await readFile(new URL("../src/components/SolutionReveal.astro", import.meta.url), "utf8");
+  const client = await readFile(new URL("../src/scripts/progress-client.ts", import.meta.url), "utf8");
+
+  assert.match(page, /data-lesson-toc/);
+  assert.match(page, /data-lesson-content/);
+  assert.match(compare, /data-lesson-section="code"/);
+  assert.match(exercise, /data-lesson-section="exercise"/);
+  assert.match(solution, /data-lesson-section="conclusion"/);
+  assert.match(client, /IntersectionObserver/);
+  assert.match(client, /data-toc-link/);
+});
+
+test("mobile navigation keeps the primary learning links available", async () => {
+  const header = await readFile(new URL("../src/components/SiteHeader.astro", import.meta.url), "utf8");
+  assert.match(header, /data-mobile-menu-toggle/);
+  assert.match(header, /data-mobile-nav/);
+  assert.match(header, /aria-controls="mobile-nav"/);
+  assert.match(styles, /\.mobile-menu-toggle/);
+  assert.match(styles, /\.mobile-nav:not\(\[hidden\]\)/);
+});
+
+test("learning overview phases can collapse to reduce scanning density", async () => {
+  const learnPage = await readFile(new URL("../src/pages/learn/index.astro", import.meta.url), "utf8");
+  assert.match(learnPage, /<details class:list=\{\["track-subsection"/);
+  assert.match(learnPage, /open=\{phase\.startOrder === 1\}/);
+  assert.match(styles, /\.track-subsection > summary/);
 });
 
 const studyMethod = await import("../src/lib/study-method.ts").catch(() => null);

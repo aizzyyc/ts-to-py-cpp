@@ -7,6 +7,8 @@ const form = document.querySelector<HTMLFormElement>("[data-search-form]");
 const input = document.querySelector<HTMLInputElement>("#course-search");
 const status = document.querySelector<HTMLElement>("[data-search-status]");
 const resultsContainer = document.querySelector<HTMLElement>("[data-search-results]");
+const suggestionsContainer = document.querySelector<HTMLElement>("[data-search-suggestions]");
+const suggestions = [...document.querySelectorAll<HTMLButtonElement>("[data-search-suggestion]")];
 
 if (indexElement && form && input && status && resultsContainer) {
   const searchStatus = status;
@@ -33,6 +35,7 @@ if (indexElement && form && input && status && resultsContainer) {
 
   function render(query: string): void {
     const trimmedQuery = query.trim();
+    if (suggestionsContainer) suggestionsContainer.hidden = Boolean(trimmedQuery);
     if (!trimmedQuery) {
       searchStatus.textContent = "输入关键词开始搜索。支持中文概念和英文代码术语。";
       searchResults.innerHTML = "";
@@ -66,4 +69,14 @@ if (indexElement && form && input && status && resultsContainer) {
   });
 
   input.addEventListener("input", () => render(input.value));
+
+  suggestions.forEach((suggestion) => {
+    suggestion.addEventListener("click", () => {
+      const query = suggestion.dataset.searchSuggestion ?? "";
+      input.value = query;
+      window.history.replaceState({}, "", sitePath(`/search?q=${encodeURIComponent(query)}`));
+      render(query);
+      input.focus();
+    });
+  });
 }

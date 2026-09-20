@@ -35,7 +35,7 @@ const isCheckpoint = phase?.checkpointLessonId === current.id;
       <article class="lesson-main">
         <nav class="lesson-breadcrumb" aria-label="面包屑导航"><a href={sitePath("/learn")}>学习路线</a><span>/</span><a href={sitePath(`/learn#${entry.data.track}`)}>{TRACK_LABELS[entry.data.track]}</a><span>/</span><span>{String(entry.data.order).padStart(2, "0")}</span></nav>
         <header class="lesson-header"><span class="eyebrow">{TRACK_LABELS[entry.data.track]} · {phase?.title ?? "LESSON"} · LESSON {String(entry.data.order).padStart(2, "0")}</span><h1>{entry.data.title}</h1><p class="lesson-summary">{entry.data.summary}</p><div class="lesson-meta"><span>{entry.data.durationMinutes} 分钟</span><span>{entry.data.concepts.join(" · ")}</span></div></header>
-        <div class="lesson-content"><Content /></div>
+        <div class="lesson-content" data-lesson-content><Content /></div>
         {(entry.data.track === "python" || entry.data.track === "cpp") && <LessonResources lessonId={entry.data.id} track={entry.data.track} />}
         {phase && <section class="lesson-phase-card" data-lesson-phase={phase.id} data-lesson-phase-track={phase.track} data-lesson-phase-total={phaseLessons.length} aria-label="当前学习阶段">
           <div class="lesson-phase-heading"><div><span class="phase-kind">当前学习阶段</span><strong>{phase.title}</strong></div><span data-lesson-phase-progress>0/{phaseLessons.length}</span></div>
@@ -44,7 +44,15 @@ const isCheckpoint = phase?.checkpointLessonId === current.id;
         </section>}
         <LessonNav currentLessonId={entry.data.id} previous={previous} next={next} />
       </article>
-      <aside class="lesson-aside" aria-label="本节概览"><span class="aside-label">IN THIS LESSON</span><ul class="aside-list"><li class="active">核心概念</li><li>代码对照</li><li>小练习</li><li>迁移结论</li></ul></aside>
+      <aside class="lesson-aside" data-lesson-toc aria-label="本节概览">
+        <span class="aside-label">本节概览</span>
+        <ol class="aside-list">
+          <li><a href="#lesson-concepts" data-toc-link="concepts">核心概念</a></li>
+          <li><a href="#lesson-code" data-toc-link="code">代码对照</a></li>
+          <li><a href="#lesson-exercise" data-toc-link="exercise">小练习</a></li>
+          <li><a href="#lesson-conclusion" data-toc-link="conclusion">迁移结论</a></li>
+        </ol>
+      </aside>
     </div>
   </section>
 </BaseLayout>

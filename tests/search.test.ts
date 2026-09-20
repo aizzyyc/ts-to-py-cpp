@@ -35,4 +35,12 @@ test("search page ships a local searchable index instead of a dev-only Pagefind 
   assert.match(source, /id="search-index"/);
   assert.match(source, /search-client\.ts/);
   assert.doesNotMatch(source, /PagefindUI/);
+  assert.match(source, /data-search-suggestion/);
+});
+
+test("search suggestions populate the query without leaving the search page", async () => {
+  const client = await readFile(new URL("../src/scripts/search-client.ts", import.meta.url), "utf8");
+  assert.match(client, /data-search-suggestion/);
+  assert.match(client, /history\.replaceState/);
+  assert.match(client, /suggestion\.addEventListener\("click"/);
 });

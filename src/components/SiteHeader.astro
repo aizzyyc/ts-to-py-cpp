@@ -25,6 +25,10 @@ const currentSection = getPrimaryNavSection(pathname, import.meta.env.BASE_URL);
       >搜索课程</a>
       <a href={sitePath("/#method")} data-nav-method>学习方法</a>
     </nav>
+    <button class="mobile-menu-toggle" type="button" data-mobile-menu-toggle aria-expanded="false" aria-controls="mobile-nav">
+      <span class="mobile-menu-icon" aria-hidden="true">☰</span>
+      <span>菜单</span>
+    </button>
     <div class="header-actions">
       <a class="header-search" href={sitePath("/search")} aria-label="搜索课程">
         <span class="search-glyph" aria-hidden="true">⌕</span>
@@ -34,30 +38,57 @@ const currentSection = getPrimaryNavSection(pathname, import.meta.env.BASE_URL);
       <a class="button button-small button-dark" href={sitePath("/learn")}>开始学习 <span aria-hidden="true">↗</span></a>
     </div>
   </div>
+  <nav id="mobile-nav" class="mobile-nav" data-mobile-nav hidden aria-label="移动端主导航">
+    <a class={currentSection === "learn" ? "is-active" : undefined} aria-current={currentSection === "learn" ? "page" : undefined} href={sitePath("/learn")}>学习路线</a>
+    <a class={currentSection === "search" ? "is-active" : undefined} aria-current={currentSection === "search" ? "page" : undefined} href={sitePath("/search")}>搜索课程</a>
+    <a href={sitePath("/#method")} data-nav-method>学习方法</a>
+  </nav>
 </header>
 
 <script>
   import { isCurrentHashTarget } from "../lib/primary-navigation";
 
-  const methodLink = document.querySelector<HTMLAnchorElement>("[data-nav-method]");
+  const methodLinks = [...document.querySelectorAll<HTMLAnchorElement>("[data-nav-method]")];
 
-  if (methodLink) {
+  if (methodLinks.length > 0) {
     const updateMethodLink = () => {
-      const target = new URL(methodLink.href, window.location.href);
-      const isCurrent = isCurrentHashTarget(
-        window.location.pathname,
-        window.location.hash,
-        target.pathname,
-        target.hash,
-      );
+      methodLinks.forEach((methodLink) => {
+        const target = new URL(methodLink.href, window.location.href);
+        const isCurrent = isCurrentHashTarget(
+          window.location.pathname,
+          window.location.hash,
+          target.pathname,
+          target.hash,
+        );
 
-      methodLink.classList.toggle("is-active", isCurrent);
-      if (isCurrent) methodLink.setAttribute("aria-current", "location");
-      else methodLink.removeAttribute("aria-current");
+        methodLink.classList.toggle("is-active", isCurrent);
+        if (isCurrent) methodLink.setAttribute("aria-current", "location");
+        else methodLink.removeAttribute("aria-current");
+      });
     };
 
     updateMethodLink();
     window.addEventListener("hashchange", updateMethodLink);
     window.addEventListener("pageshow", updateMethodLink);
+  }
+
+  const menuToggle = document.querySelector<HTMLButtonElement>("[data-mobile-menu-toggle]");
+  const mobileNav = document.querySelector<HTMLElement>("[data-mobile-nav]");
+
+  if (menuToggle && mobileNav) {
+    const closeMenu = () => {
+      mobileNav.hidden = true;
+      menuToggle.setAttribute("aria-expanded", "false");
+    };
+
+    menuToggle.addEventListener("click", () => {
+      const isOpen = !mobileNav.hidden;
+      mobileNav.hidden = isOpen;
+      menuToggle.setAttribute("aria-expanded", String(!isOpen));
+    });
+    mobileNav.querySelectorAll("a").forEach((link) => link.addEventListener("click", closeMenu));
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeMenu();
+    });
   }
 </script>

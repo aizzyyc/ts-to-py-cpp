@@ -6,7 +6,7 @@ interface Props {
 const { title = "本节结论" } = Astro.props;
 ---
 
-<details class="solution-reveal">
+<details class="solution-reveal" data-lesson-section="conclusion">
   <summary><span>{title}</span><span class="summary-arrow" aria-hidden="true">↘</span></summary>
   <div class="solution-content"><slot /></div>
 </details>

@@ -73,7 +73,10 @@ function renderResume(state: ProgressState, goal: Goal | null): void {
   const copy = card.querySelector<HTMLElement>("[data-resume-copy]");
   const status = card.querySelector<HTMLElement>("[data-resume-status]");
   const link = card.querySelector<HTMLAnchorElement>("[data-resume-link]");
-
+  const visibleCompletedCount = state.completedLessonIds.filter((id) => {
+    const completedLesson = LESSONS.find((candidate) => candidate.id === id);
+    return completedLesson ? isTrackVisible(completedLesson.track, goal) : false;
+  }).length;
   if (!lesson) {
     card.hidden = false;
     if (title) title.textContent = "路线已完成";
@@ -92,7 +95,15 @@ function renderResume(state: ProgressState, goal: Goal | null): void {
   if (title) title.textContent = lesson.title;
   if (phase) phase.textContent = lessonPhase?.title ?? "下一节课程";
   if (copy) copy.textContent = `${lesson.summary} 预计 ${lesson.durationMinutes} 分钟。`;
-  if (status) status.textContent = state.lastViewedLessonId === lesson.id ? "接着上次学习" : "下一节推荐";
+  if (status) {
+    if (!state.lastViewedLessonId && visibleCompletedCount === 0) {
+      status.textContent = "推荐开始";
+    } else if (state.lastViewedLessonId === lesson.id && visibleCompletedCount === 0) {
+      status.textContent = "已浏览 · 继续学习";
+    } else {
+      status.textContent = state.lastViewedLessonId === lesson.id ? "接着上次学习" : "下一节推荐";
+    }
+  }
   if (link) {
     link.href = sitePath(`/learn/${lesson.track}/${lesson.slug}`);
     link.innerHTML = '继续学习 <span aria-hidden="true">↗</span>';
@@ -215,6 +226,75 @@ function initPhaseNavigation(): void {
   updatePhaseNavigation();
 }
 
+function initCurrentLessonNavigation(): void {
+  const currentLesson = document.querySelector<HTMLAnchorElement>(".lesson-link.current");
+  if (!currentLesson) return;
+
+  window.requestAnimationFrame(() => currentLesson.scrollIntoView({ block: "nearest" }));
+}
+
+function initLessonToc(): void {
+  const toc = document.querySelector<HTMLElement>("[data-lesson-toc]");
+  const content = document.querySelector<HTMLElement>("[data-lesson-content]");
+  if (!toc || !content) return;
+
+  const firstHeading = content.querySelector<HTMLElement>("h2");
+  if (firstHeading) {
+    firstHeading.id = "lesson-concepts";
+    firstHeading.dataset.lessonSection = "concepts";
+  }
+
+  const sections = new Map<string, HTMLElement>();
+  content.querySelectorAll<HTMLElement>("[data-lesson-section]").forEach((section) => {
+    const key = section.dataset.lessonSection;
+    if (!key) return;
+    if (sections.has(key)) return;
+    section.id = `lesson-${key}`;
+    sections.set(key, section);
+  });
+  if (firstHeading) sections.set("concepts", firstHeading);
+
+  const links = [...toc.querySelectorAll<HTMLAnchorElement>("[data-toc-link]")];
+  const visibleLinks = links.filter((link) => {
+    const key = link.dataset.tocLink;
+    const target = key ? sections.get(key) : undefined;
+    if (!target) link.closest("li")?.remove();
+    return Boolean(target);
+  });
+  if (visibleLinks.length === 0) return;
+
+  const setActive = (key: string) => {
+    visibleLinks.forEach((link) => {
+      const active = link.dataset.tocLink === key;
+      link.classList.toggle("is-active", active);
+      if (active) link.setAttribute("aria-current", "location");
+      else link.removeAttribute("aria-current");
+    });
+  };
+
+  visibleLinks.forEach((link) => {
+    link.addEventListener("click", () => {
+      const key = link.dataset.tocLink;
+      if (key) setActive(key);
+    });
+  });
+  setActive(visibleLinks[0].dataset.tocLink ?? "concepts");
+
+  if ("IntersectionObserver" in window) {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+        const key = visible[0]?.target instanceof HTMLElement ? visible[0].target.dataset.lessonSection : undefined;
+        if (key) setActive(key);
+      },
+      { rootMargin: "-120px 0px -65% 0px", threshold: [0, 1] },
+    );
+    sections.forEach((section) => observer.observe(section));
+  }
+}
+
 function applyRouteFilter(goal: Goal | null): void {
   const visibleTracks = getVisibleTracks(goal);
   document.querySelectorAll<HTMLElement>(".route-group[data-track], .track-section[data-track]").forEach((element) => {
@@ -231,6 +311,12 @@ function applyRouteFilter(goal: Goal | null): void {
   document.querySelectorAll<HTMLElement>("[data-route-mode-copy]").forEach((element) => {
     element.textContent = goal === "ai" ? "Python 迁移基础 + AI 专项" : goal === "robotics" ? "C++ 迁移基础 + Robotics 专项" : "";
   });
+  document.querySelectorAll<HTMLAnchorElement>("[data-goal-switch]").forEach((link) => {
+    const active = link.dataset.goalSwitch === goal;
+    link.classList.toggle("is-active", active);
+    if (active) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  });
   updatePhaseNavigation();
 }
 
@@ -246,6 +332,8 @@ function showPersistenceNotice(): void {
 const initialGoal = getGoalFromLocation();
 applyRouteFilter(initialGoal);
 initPhaseNavigation();
+initCurrentLessonNavigation();
+initLessonToc();
 render(store.read(), initialGoal);
 showPersistenceNotice();
 

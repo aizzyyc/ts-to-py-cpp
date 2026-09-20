@@ -21,7 +21,12 @@ const tracks: Track[] = ["common", "python", "cpp"];
     <div class="page-container">
       <div class="route-mode" data-route-mode hidden>
         <div><span class="eyebrow">CURRENT PATH</span><strong data-route-mode-label></strong><span data-route-mode-copy>语言迁移基础 + 专项内容</span></div>
-        <a href={sitePath("/learn")} data-clear-goal>查看全部路线</a>
+        <div class="route-mode-actions">
+          <span class="route-mode-switch-label">切换路线</span>
+          <a href={sitePath("/learn?goal=ai")} data-goal-switch="ai">AI 路线</a>
+          <a href={sitePath("/learn?goal=robotics")} data-goal-switch="robotics">Robotics 路线</a>
+          <a href={sitePath("/learn")} data-clear-goal>查看全部路线</a>
+        </div>
       </div>
       <ContinueLearning />
       <div class="learn-layout">
@@ -35,11 +40,11 @@ const tracks: Track[] = ["common", "python", "cpp"];
                 const lessons = getPhaseLessons(trackLessons, phase);
                 const checkpointLesson = phase.checkpointLessonId ? lessons.find((lesson) => lesson.id === phase.checkpointLessonId) : undefined;
                 const duration = lessons.reduce((total, lesson) => total + lesson.durationMinutes, 0);
-                return <section class:list={["track-subsection", { "phase-project": phase.project }]} id={phase.id} tabindex="-1" aria-labelledby={`phase-heading-${phase.id}`} data-phase-id={phase.id} data-phase-track={track} data-overview-phase>
-                  <div class="track-section-header">
+                return <details class:list={["track-subsection", { "phase-project": phase.project }]} id={phase.id} open={phase.startOrder === 1} tabindex="-1" aria-labelledby={`phase-heading-${phase.id}`} data-phase-id={phase.id} data-phase-track={track} data-overview-phase>
+                  <summary class="track-section-header">
                     <div class="track-title-wrap"><span class:list={["track-dot", track]}></span><div><span class="phase-kind">{phase.project ? "结课项目" : "学习阶段"}</span><h2 id={`phase-heading-${phase.id}`}>{phase.title}</h2><p>{phase.description}</p></div></div>
-                    <span class="track-count">{lessons.length} LESSONS</span>
-                  </div>
+                    <span class="track-count">{lessons.length} LESSONS <span class="phase-toggle" aria-hidden="true">+</span></span>
+                  </summary>
                   <div class="phase-meta">
                     <span data-phase-progress data-phase-total={lessons.length}>0/{lessons.length}</span>
                     <span>{duration} 分钟</span>
@@ -54,7 +59,7 @@ const tracks: Track[] = ["common", "python", "cpp"];
                       <span class="course-arrow" aria-hidden="true">↗</span>
                     </a>)}
                   </div>
-                </section>;
+                </details>;
               })}
             </section>;
          })}

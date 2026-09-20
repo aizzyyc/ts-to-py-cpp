@@ -9,7 +9,7 @@ interface Props {
 const { title, prompt, hint, solution } = Astro.props;
 ---
 
-<section class="exercise" aria-labelledby={`exercise-${title}`}>
+<section class="exercise" data-lesson-section="exercise" aria-labelledby={`exercise-${title}`}>
   <div class="exercise-heading">
     <span class="exercise-number">01</span>
     <div>
