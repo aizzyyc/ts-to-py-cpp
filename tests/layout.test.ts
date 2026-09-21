@@ -135,6 +135,21 @@ test("learning-method navigation is current only at its exact anchor", () => {
   );
 });
 
+test("learning-method navigation scrolls to the anchor after a route transition", async () => {
+  const header = await readFile(new URL("../src/components/SiteHeader.astro", import.meta.url), "utf8");
+  assert.match(header, /scrollIntoView\(\{ block: "start" \}\)/);
+  assert.match(header, /requestAnimationFrame/);
+  assert.match(header, /addEventListener\("pageshow"/);
+});
+
+test("focused routes keep shared foundations reachable without mixing course lists", async () => {
+  const learnPage = await readFile(new URL("../src/pages/learn/index.astro", import.meta.url), "utf8");
+  assert.match(learnPage, /data-shared-foundation-link/);
+  assert.match(learnPage, /data-shared-foundation-link[^>]*data-clear-goal/);
+  assert.match(learnPage, /共同基础/);
+  assert.match(learnPage, /common-orientation/);
+});
+
 test("active primary navigation uses a quiet underline instead of a filled pill", () => {
   const activeRule = styles.match(/\.desktop-nav a\.is-active\s*\{([^}]*)\}/)?.[1] ?? "";
   const indicatorRule = styles.match(/\.desktop-nav a\.is-active::after\s*\{([^}]*)\}/)?.[1] ?? "";
@@ -171,6 +186,13 @@ test("lesson overview exposes real anchors and scroll-synced active sections", a
   assert.match(solution, /data-lesson-section="conclusion"/);
   assert.match(client, /IntersectionObserver/);
   assert.match(client, /data-toc-link/);
+});
+
+test("mobile code comparison explains how to read long lines", async () => {
+  const compare = await readFile(new URL("../src/components/CompareCode.astro", import.meta.url), "utf8");
+  assert.match(compare, /data-code-scroll-hint/);
+  assert.match(styles, /\.code-scroll-hint/);
+  assert.match(styles, /@media\s*\(max-width:\s*760px\)[\s\S]*?\.code-scroll-hint\s*\{[^}]*display:\s*inline/s);
 });
 
 test("mobile navigation keeps the primary learning links available", async () => {

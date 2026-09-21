@@ -67,9 +67,19 @@ const currentSection = getPrimaryNavSection(pathname, import.meta.env.BASE_URL);
       });
     };
 
-    updateMethodLink();
-    window.addEventListener("hashchange", updateMethodLink);
-    window.addEventListener("pageshow", updateMethodLink);
+    const syncMethodNavigation = () => {
+      updateMethodLink();
+      if (window.location.hash !== "#method") return;
+
+      window.requestAnimationFrame(() => {
+        document.getElementById("method")?.scrollIntoView({ block: "start" });
+      });
+    };
+
+    syncMethodNavigation();
+    window.addEventListener("hashchange", syncMethodNavigation);
+    window.addEventListener("pageshow", syncMethodNavigation);
+    window.addEventListener("load", syncMethodNavigation, { once: true });
   }
 
   const menuToggle = document.querySelector<HTMLButtonElement>("[data-mobile-menu-toggle]");

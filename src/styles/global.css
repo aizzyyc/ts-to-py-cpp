@@ -132,6 +132,7 @@ kbd { padding: 1px 5px; border: 1px solid var(--line-strong); border-bottom-widt
 .route-mode > div { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px 12px; }
 .route-mode strong { font-size: 14px; }
 .route-mode [data-route-mode-copy] { color: var(--muted); font-size: 13px; }
+.route-mode-foundation-link { color: var(--blue-dark) !important; font-size: 12px !important; }
 .route-mode-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 7px 13px; }
 .route-mode-switch-label { color: var(--faint); font-size: 12px; }
 .route-mode a { color: var(--blue-dark); font-size: 13px; text-decoration: underline; text-underline-offset: 3px; white-space: nowrap; }
@@ -261,6 +262,7 @@ kbd { padding: 1px 5px; border: 1px solid var(--line-strong); border-bottom-widt
 .code-compare { margin: 30px 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--surface); }
 .compare-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 16px; border-bottom: 1px solid var(--line); }
 .compare-hint { color: var(--muted); font-size: 12px; }
+.code-scroll-hint { display: none; color: var(--blue-dark); font-size: 11px; font-weight: 700; }
 .compare-grid { display: grid; grid-template-columns: minmax(0, 1fr) 28px minmax(0, 1fr); align-items: stretch; }
 .code-pane { min-width: 0; background: #fbfcfe; }
 .target-pane { background: #fafbff; }
@@ -378,6 +380,7 @@ code { font-family: var(--mono); }
   .learn-hero .progress-indicator { display: inline-flex; margin-top: 23px; }
   .route-mode { align-items: flex-start; flex-direction: column; gap: 10px; }
   .route-mode-actions { justify-content: flex-start; }
+  .route-mode-foundation-link { font-size: 12px !important; }
   .resume-card { padding: 18px; }
   .resume-card-heading { align-items: flex-start; flex-direction: column; gap: 6px; }
   .resume-card-body { display: block; }
@@ -405,6 +408,8 @@ code { font-family: var(--mono); }
   .compare-grid { grid-template-columns: 1fr; }
   .compare-arrow { min-height: 28px; transform: rotate(90deg); }
   .compare-hint { display: none; }
+  .compare-header { flex-wrap: wrap; }
+  .code-scroll-hint { display: inline; flex-basis: 100%; }
   .code-pane pre { min-height: 0; }
   .search-input-row { align-items: stretch; flex-direction: column; }
   .search-input-row .button { width: 100%; }
