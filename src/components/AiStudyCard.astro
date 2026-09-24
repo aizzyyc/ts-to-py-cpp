@@ -1,0 +1,46 @@
+---
+interface Props {
+  lessonTitle: string;
+  lessonSummary: string;
+  trackLabel: string;
+}
+
+const { lessonTitle, lessonSummary, trackLabel } = Astro.props;
+const promptItems = [
+  {
+    label: "概念迁移",
+    prompt: `我正在学习「${lessonTitle}」（${trackLabel}）。课程摘要：${lessonSummary}\n请用 JS/TS 对照 Python 或 C++ 解释本节的核心概念：先给出一张简短的概念映射表，再说明不能直接类比的地方。不要假设我已经运行过代码，最后给我一个 5 分钟内可完成的验证问题。`,
+  },
+  {
+    label: "变式练习",
+    prompt: `围绕「${lessonTitle}」设计一个由易到难的变式练习。请只给需求、输入输出约束和验收标准，不要直接给完整答案；我提交代码后，再逐步提示我。练习必须能在本地运行，并明确 Python / C++ 中需要注意的差异。`,
+  },
+  {
+    label: "排错辅助",
+    prompt: `我在「${lessonTitle}」遇到了问题。请先让我提供最小复现代码、完整错误信息、运行命令和实际输出，再按“复现—定位—验证—修复”顺序协助排查。不要猜测未提供的环境信息，也不要声称已经运行过我的代码。`,
+  },
+  {
+    label: "复习检查",
+    prompt: `请对「${lessonTitle}」做一次 5 题复习检查：2 题概念、2 题代码阅读、1 题排错。先逐题提问并等待我的回答，不要一次公布答案；每题结束时指出我还缺少哪条证据或工程习惯。`,
+  },
+] as const;
+---
+
+<section class="ai-study-card" data-ai-study-card aria-labelledby="ai-study-card-title">
+  <div class="ai-study-card-header">
+    <div>
+      <span class="eyebrow">AI STUDY CARD</span>
+      <h2 id="ai-study-card-title">把 AI 当作练习搭档</h2>
+    </div>
+    <span class="ai-study-card-note">复制提示词后，在你常用的 AI 工具中使用</span>
+  </div>
+  <p class="ai-study-card-copy">AI 可以帮你解释、出题和排错，但最终结论要以本地代码、测试和实际输出来确认。</p>
+  <div class="ai-study-prompts">
+    {promptItems.map((item) => (
+      <button class="ai-prompt-button" type="button" data-ai-prompt={item.label} data-copy-text={item.prompt}>
+        <span>{item.label}</span>
+        <span aria-hidden="true">复制提示 ↗</span>
+      </button>
+    ))}
+  </div>
+</section>

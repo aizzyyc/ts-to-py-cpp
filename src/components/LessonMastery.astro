@@ -1,0 +1,30 @@
+---
+interface Props {
+  lessonTitle: string;
+}
+
+const { lessonTitle } = Astro.props;
+
+const standards = [
+  { label: "能解释", copy: "不用照抄术语，能说明本节机制解决什么问题，以及它和 JS / TS 的关键差异。" },
+  { label: "能阅读", copy: "能读懂一段真实的 Python 或 C++ 代码，指出入口、数据流和主要边界。" },
+  { label: "能修改", copy: "能在给定代码上完成一个小改动，并说明改动会影响哪些输入、输出或资源。" },
+  { label: "能排错", copy: "遇到错误时能先复现、缩小范围，再用日志、类型或工具验证自己的判断。" },
+];
+---
+
+<section class="lesson-mastery" data-lesson-mastery aria-labelledby="lesson-mastery-title">
+  <div class="lesson-mastery-heading">
+    <span class="eyebrow">MASTERY CHECK</span>
+    <h2 id="lesson-mastery-title">本节掌握标准</h2>
+    <p>学完「{lessonTitle}」后，不只要看懂，还要能把知识迁移到自己的代码里。</p>
+  </div>
+  <ul class="lesson-mastery-list">
+    {standards.map((standard) => (
+      <li class="lesson-mastery-item">
+        <strong>{standard.label}</strong>
+        <span>{standard.copy}</span>
+      </li>
+    ))}
+  </ul>
+</section>

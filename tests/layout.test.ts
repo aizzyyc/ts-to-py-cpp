@@ -227,6 +227,27 @@ test("learning routes expose level summaries and course badges", async () => {
   assert.match(styles, /\.route-learning-stats/);
 });
 
+test("lesson detail exposes mastery standards and safe AI study prompts", async () => {
+  const page = await readFile(new URL("../src/pages/learn/[track]/[slug].astro", import.meta.url), "utf8");
+  const mastery = await readFile(new URL("../src/components/LessonMastery.astro", import.meta.url), "utf8").catch(() => "");
+  const aiCard = await readFile(new URL("../src/components/AiStudyCard.astro", import.meta.url), "utf8").catch(() => "");
+  const client = await readFile(new URL("../src/scripts/progress-client.ts", import.meta.url), "utf8");
+
+  assert.match(page, /LessonMastery/);
+  assert.match(page, /AiStudyCard/);
+  assert.match(mastery, /能解释/);
+  assert.match(mastery, /能阅读/);
+  assert.match(mastery, /能修改/);
+  assert.match(mastery, /能排错/);
+  assert.match(aiCard, /概念迁移/);
+  assert.match(aiCard, /变式练习/);
+  assert.match(aiCard, /排错辅助/);
+  assert.match(aiCard, /复习检查/);
+  assert.match(aiCard, /data-copy-text/);
+  assert.match(client, /querySelectorAll<HTMLButtonElement>\("\[data-copy-text\]"\)/);
+  assert.match(client, /请手动复制/);
+});
+
 const studyMethod = await import("../src/lib/study-method.ts").catch(() => null);
 
 test("study method provides a timed routine, concrete outputs, and a recovery path", () => {

@@ -411,6 +411,21 @@ document.querySelectorAll<HTMLButtonElement>("[data-copy-code]").forEach((button
   });
 });
 
+document.querySelectorAll<HTMLButtonElement>("[data-copy-text]").forEach((button) => {
+  const originalLabel = button.innerHTML;
+  button.addEventListener("click", async () => {
+    const prompt = button.dataset.copyText ?? "";
+    try {
+      await navigator.clipboard.writeText(prompt);
+      button.innerHTML = "<span>已复制</span><span aria-hidden=\"true\">✓</span>";
+      window.setTimeout(() => (button.innerHTML = originalLabel), 1400);
+    } catch {
+      button.innerHTML = "<span>请手动复制</span><span aria-hidden=\"true\">↗</span>";
+      window.setTimeout(() => (button.innerHTML = originalLabel), 1600);
+    }
+  });
+});
+
 document.addEventListener("keydown", (event) => {
   if (event.key !== "/" || ["INPUT", "TEXTAREA"].includes((event.target as HTMLElement)?.tagName)) return;
   event.preventDefault();

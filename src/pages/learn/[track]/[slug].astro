@@ -5,6 +5,8 @@ import LessonNav from "../../../components/LessonNav.astro";
 import RouteSidebar from "../../../components/RouteSidebar.astro";
 import LessonResources from "../../../components/LessonResources.astro";
 import LessonLevelBadge from "../../../components/LessonLevelBadge.astro";
+import LessonMastery from "../../../components/LessonMastery.astro";
+import AiStudyCard from "../../../components/AiStudyCard.astro";
 import { getCoursePhases, getPhaseLessons } from "../../../lib/course-flow";
 import { LESSONS, TRACK_LABELS, type Track } from "../../../lib/lessons";
 import { getLessonClassification } from "../../../lib/lesson-levels";
@@ -38,8 +40,10 @@ const classification = getLessonClassification(current);
       <article class="lesson-main">
         <nav class="lesson-breadcrumb" aria-label="面包屑导航"><a href={sitePath("/learn")}>学习路线</a><span>/</span><a href={sitePath(`/learn#${entry.data.track}`)}>{TRACK_LABELS[entry.data.track]}</a><span>/</span><span>{String(entry.data.order).padStart(2, "0")}</span></nav>
         <header class="lesson-header"><span class="eyebrow">{TRACK_LABELS[entry.data.track]} · {phase?.title ?? "LESSON"} · LESSON {String(entry.data.order).padStart(2, "0")}</span><h1>{entry.data.title}</h1><div class="lesson-header-badges"><LessonLevelBadge {...classification} /></div><p class="lesson-summary">{entry.data.summary}</p><div class="lesson-meta"><span>{entry.data.durationMinutes} 分钟</span><span>{entry.data.concepts.join(" · ")}</span></div></header>
+        <LessonMastery lessonTitle={entry.data.title} />
         <div class="lesson-content" data-lesson-content><Content /></div>
         {(entry.data.track === "python" || entry.data.track === "cpp") && <LessonResources lessonId={entry.data.id} track={entry.data.track} />}
+        <AiStudyCard lessonTitle={entry.data.title} lessonSummary={entry.data.summary} trackLabel={TRACK_LABELS[entry.data.track]} />
         {phase && <section class="lesson-phase-card" data-lesson-phase={phase.id} data-lesson-phase-track={phase.track} data-lesson-phase-total={phaseLessons.length} aria-label="当前学习阶段">
           <div class="lesson-phase-heading"><div><span class="phase-kind">当前学习阶段</span><strong>{phase.title}</strong></div><span data-lesson-phase-progress>0/{phaseLessons.length}</span></div>
           <div class="phase-progress-bar" aria-hidden="true"><span data-lesson-phase-bar></span></div>
