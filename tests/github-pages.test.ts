@@ -38,3 +38,12 @@ test("README exposes the GitHub Pages entry point", async () => {
   assert.match(readme, /https:\/\/aizzyyc\.github\.io\/ts-to-py-cpp\//);
   assert.match(readme, /GitHub Actions/);
 });
+
+test("README explains the foundation-first learning boundary", async () => {
+  const readme = await read("README.md");
+
+  assert.match(readme, /如何学习/);
+  assert.match(readme, /基础.*进阶/s);
+  assert.match(readme, /案例.*验证/s);
+  assert.match(readme, /AI.*运行.*测试/s);
+});

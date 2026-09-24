@@ -284,3 +284,23 @@
 - `node --experimental-strip-types --test tests/layout.test.ts`：19/19 通过；`npm test`：49/49 通过。
 - `npm run check`：0 errors / 0 warnings / 0 hints；`npm run build`：95 个页面构建成功，Pagefind 索引 95 个页面、6239 个词。
 - 浏览器验收通过：学习方法锚点落位并高亮；共同基础入口清除专线筛选并显示 1/92；AI / Robotics 专线仍只显示各自课程；代码对照已补充窄屏阅读提示。
+
+## 本轮课程定位修正：基础与进阶主线、AI 辅助与案例验证
+
+- [x] 确认网站继续以 Python / C++ 基础和进阶知识为主，不改成项目制课程
+- [x] 编写分层课程与 AI 辅助学习设计稿，保留现有 92 节课程
+- [x] 用户审阅设计稿并确认 Phase 1 范围
+- [x] 增加基础 / 进阶 / 案例课程分层与路线统计
+- [x] 增加课程掌握标准和 AI 学习卡
+- [ ] 增加代表性 Python / C++ 案例代码与验证说明
+- [x] 运行课程测试、类型检查、生产构建和浏览器验收
+
+### Review
+
+- 设计稿：`docs/superpowers/specs/2026-09-24-layered-curriculum-and-ai-support-design.md`
+- 用户已确认按推荐方案自动执行；Phase 1 保留 92 节基础 / 进阶主线，不把网站改成项目制课程。
+- 已完成课程分层、路线统计、详情页掌握标准和四类 AI 学习卡；案例独立代码与验证说明按设计留到 Phase 2。
+- `node --experimental-strip-types --test tests/layout.test.ts`：21/21 通过；`npm test`：52/52 通过；`npm run check`：0 errors / 0 warnings / 0 hints。
+- `npm run build`：95 个静态页面构建成功，Pagefind 索引 95 个页面、6,248 个词；`git diff --check` 通过。
+- 浏览器验收通过：AI / Robotics 路线统计、Python / C++ 详情页掌握标准、AI 学习卡复制、窄屏课程内容和翻页均正常。
+- 本轮目标是验证并发布 Phase 1，不提前宣称 Phase 2 案例完成。
