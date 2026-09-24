@@ -14,6 +14,8 @@ const lessons = defineCollection({
     durationMinutes: z.number().int().positive(),
     concepts: z.array(z.string()).min(1),
     prerequisites: z.array(z.string()).optional(),
+    level: z.enum(["foundation", "advanced"]).optional(),
+    learningMode: z.enum(["concept", "case"]).optional(),
   }),
 });
 
