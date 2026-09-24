@@ -271,6 +271,17 @@ kbd { padding: 1px 5px; border: 1px solid var(--line-strong); border-bottom-widt
 .language-dot.target { background: var(--blue); }
 .copy-button { margin-left: auto; padding: 3px 7px; border: 1px solid transparent; border-radius: 5px; color: var(--faint); background: transparent; font-size: 10px; }
 .copy-button:hover { border-color: var(--line); color: var(--text); background: var(--surface); }
+.lesson-header-badges { margin: 12px 0 0; }
+.lesson-level-badge { display: inline-flex; align-items: center; gap: 6px; color: var(--blue-dark); font-size: 11px; font-weight: 750; letter-spacing: .04em; }
+.lesson-learning-mode { padding-left: 6px; border-left: 1px solid var(--line); color: var(--muted); font-weight: 650; }
+.route-learning-stats { display: grid; gap: 14px; margin: 24px 0 30px; padding: 18px 20px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+.route-learning-stats-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 18px; }
+.route-learning-stats-heading strong { color: var(--text); font-size: 15px; }
+.route-learning-stat-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.route-learning-stat { display: grid; gap: 4px; padding-top: 10px; border-top: 1px solid var(--line); }
+.route-learning-stat-label { color: var(--muted); font-size: 12px; font-weight: 700; }
+.route-learning-stat strong { color: var(--text); font-size: 17px; }
+.route-learning-stat > span:last-child { color: var(--faint); font-size: 11px; }
 pre { margin: 0; overflow-x: auto; }
 code { font-family: var(--mono); }
 .code-pane pre { min-height: 113px; padding: 17px 15px; color: #334158; font-size: 13px; line-height: 1.75; }
@@ -350,6 +361,10 @@ code { font-family: var(--mono); }
 }
 
 @media (max-width: 760px) {
+  .route-learning-stats-heading { align-items: flex-start; flex-direction: column; gap: 5px; }
+  .route-learning-stat-list { grid-template-columns: 1fr; }
+  .route-learning-stat { grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; }
+  .route-learning-stat > span:last-child { grid-column: 1 / -1; }
   .page-container { width: min(100% - 32px, 620px); }
   .header-inner { min-height: 62px; gap: 17px; }
   .desktop-nav, .header-search .search-label, .header-search kbd { display: none; }

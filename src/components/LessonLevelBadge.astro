@@ -1,0 +1,16 @@
+---
+import type { LearningMode, LessonLevel } from "../lib/lesson-levels";
+
+interface Props {
+  level: LessonLevel;
+  learningMode?: LearningMode;
+}
+
+const { level, learningMode = "concept" } = Astro.props;
+const levelLabel = level === "foundation" ? "基础" : "进阶";
+---
+
+<span class="lesson-level-badge" data-lesson-level={level}>
+  {levelLabel}
+  {learningMode === "case" && <span class="lesson-learning-mode">案例</span>}
+</span>

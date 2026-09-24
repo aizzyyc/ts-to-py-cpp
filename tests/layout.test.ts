@@ -211,6 +211,22 @@ test("learning overview phases can collapse to reduce scanning density", async (
   assert.match(styles, /\.track-subsection > summary/);
 });
 
+test("learning routes expose level summaries and course badges", async () => {
+  const learnPage = await readFile(new URL("../src/pages/learn/index.astro", import.meta.url), "utf8");
+  const detailPage = await readFile(new URL("../src/pages/learn/[track]/[slug].astro", import.meta.url), "utf8");
+  const badge = await readFile(new URL("../src/components/LessonLevelBadge.astro", import.meta.url), "utf8").catch(() => "");
+
+  assert.match(learnPage, /getLessonClassificationStats/);
+  assert.match(learnPage, /data-route-learning-stats/);
+  assert.match(learnPage, /LessonLevelBadge/);
+  assert.match(detailPage, /LessonLevelBadge/);
+  assert.match(badge, /基础/);
+  assert.match(badge, /进阶/);
+  assert.match(badge, /案例/);
+  assert.match(styles, /\.lesson-level-badge/);
+  assert.match(styles, /\.route-learning-stats/);
+});
+
 const studyMethod = await import("../src/lib/study-method.ts").catch(() => null);
 
 test("study method provides a timed routine, concrete outputs, and a recovery path", () => {

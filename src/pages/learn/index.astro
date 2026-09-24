@@ -3,11 +3,14 @@ import BaseLayout from "../../layouts/BaseLayout.astro";
 import ContinueLearning from "../../components/ContinueLearning.astro";
 import ProgressIndicator from "../../components/ProgressIndicator.astro";
 import RouteSidebar from "../../components/RouteSidebar.astro";
+import LessonLevelBadge from "../../components/LessonLevelBadge.astro";
 import { getCoursePhases, getPhaseLessons } from "../../lib/course-flow";
 import { LESSONS, type Track } from "../../lib/lessons";
+import { formatLearningMinutes, getLessonClassification, getLessonClassificationStats } from "../../lib/lesson-levels";
 import { sitePath } from "../../lib/site-path";
 
 const tracks: Track[] = ["common", "python", "cpp"];
+const routeStats = tracks.map((track) => ({ track, stats: getLessonClassificationStats(LESSONS, track) }));
 ---
 
 <BaseLayout title="学习路线 · LangShift">
@@ -26,6 +29,19 @@ const tracks: Track[] = ["common", "python", "cpp"];
           <a href={sitePath("/learn?goal=ai")} data-goal-switch="ai">AI 路线</a>
           <a href={sitePath("/learn?goal=robotics")} data-goal-switch="robotics">Robotics 路线</a>
           <a href={sitePath("/learn")} data-clear-goal>查看全部路线</a>
+        </div>
+      </div>
+      <div class="route-learning-stats" data-route-learning-stats aria-label="课程分层与预计学习时间">
+        <div class="route-learning-stats-heading">
+          <span class="eyebrow">LEARNING MAP</span>
+          <strong>先学基础，再按目标进入进阶</strong>
+        </div>
+        <div class="route-learning-stat-list">
+          {routeStats.map(({ track, stats }) => <div class="route-learning-stat" data-route-stat={track}>
+            <span class="route-learning-stat-label">{track === "common" ? "迁移基础" : track === "python" ? "Python / AI" : "C++ / Robotics"}</span>
+            <strong>{formatLearningMinutes(stats.totalMinutes)}</strong>
+            <span>{stats.foundationCount} 基础 · {stats.advancedCount} 进阶 · {stats.caseCount} 案例</span>
+          </div>)}
         </div>
       </div>
       <ContinueLearning />
@@ -55,7 +71,7 @@ const tracks: Track[] = ["common", "python", "cpp"];
                     {lessons.map((lesson) => <a class="course-row" href={sitePath(`/learn/${lesson.track}/${lesson.slug}`)} data-lesson-id={lesson.id}>
                       <span class="course-index">{String(lesson.order).padStart(2, "0")}</span>
                       <span class="course-copy"><h3>{lesson.title}</h3><p>{lesson.summary}</p></span>
-                      <span class="course-tags">{lesson.concepts.slice(0, 2).map((concept) => <span class="tag">{concept}</span>)}</span>
+                      <span class="course-tags">{lesson.concepts.slice(0, 2).map((concept) => <span class="tag">{concept}</span>)}<LessonLevelBadge {...getLessonClassification(lesson)} /></span>
                       <span class="course-arrow" aria-hidden="true">↗</span>
                     </a>)}
                   </div>
