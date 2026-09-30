@@ -2,35 +2,44 @@ import { TRACK_LABELS, type Track } from "../lib/lessons";
 import { searchLessons, type SearchEntry } from "../lib/search";
 import { sitePath } from "../lib/site-path";
 
-const indexElement = document.querySelector<HTMLScriptElement>("#search-index");
-const form = document.querySelector<HTMLFormElement>("[data-search-form]");
-const input = document.querySelector<HTMLInputElement>("#course-search");
-const status = document.querySelector<HTMLElement>("[data-search-status]");
-const resultsContainer = document.querySelector<HTMLElement>("[data-search-results]");
-const suggestionsContainer = document.querySelector<HTMLElement>("[data-search-suggestions]");
-const suggestions = [...document.querySelectorAll<HTMLButtonElement>("[data-search-suggestion]")];
+let searchController: AbortController | undefined;
 
-if (indexElement && form && input && status && resultsContainer) {
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>'"]/g, (character) => {
+    const entities: Record<string, string> = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      "'": "&#39;",
+      '"': "&quot;",
+    };
+    return entities[character];
+  });
+}
+
+function initializeSearchPage(): void {
+  searchController?.abort();
+
+  const indexElement = document.querySelector<HTMLScriptElement>("#search-index");
+  const form = document.querySelector<HTMLFormElement>("[data-search-form]");
+  const input = document.querySelector<HTMLInputElement>("#course-search");
+  const status = document.querySelector<HTMLElement>("[data-search-status]");
+  const resultsContainer = document.querySelector<HTMLElement>("[data-search-results]");
+  const suggestionsContainer = document.querySelector<HTMLElement>("[data-search-suggestions]");
+  const suggestions = [...document.querySelectorAll<HTMLButtonElement>("[data-search-suggestion]")];
+
+  if (!indexElement || !form || !input || !status || !resultsContainer) return;
+
   const searchStatus = status;
   const searchResults = resultsContainer;
+  const controller = new AbortController();
+  searchController = controller;
+  const { signal } = controller;
   let entries: SearchEntry[] = [];
   try {
     entries = JSON.parse(indexElement.textContent ?? "[]") as SearchEntry[];
   } catch {
     searchStatus.textContent = "课程索引加载失败，请刷新页面重试。";
-  }
-
-  function escapeHtml(value: string): string {
-    return value.replace(/[&<>'"]/g, (character) => {
-      const entities: Record<string, string> = {
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        "'": "&#39;",
-        '"': "&quot;",
-      };
-      return entities[character];
-    });
   }
 
   function render(query: string): void {
@@ -66,9 +75,9 @@ if (indexElement && form && input && status && resultsContainer) {
     const nextUrl = query ? sitePath(`/search?q=${encodeURIComponent(query)}`) : sitePath("/search");
     window.history.replaceState({}, "", nextUrl);
     render(query);
-  });
+  }, { signal });
 
-  input.addEventListener("input", () => render(input.value));
+  input.addEventListener("input", () => render(input.value), { signal });
 
   suggestions.forEach((suggestion) => {
     suggestion.addEventListener("click", () => {
@@ -77,6 +86,8 @@ if (indexElement && form && input && status && resultsContainer) {
       window.history.replaceState({}, "", sitePath(`/search?q=${encodeURIComponent(query)}`));
       render(query);
       input.focus();
-    });
+    }, { signal });
   });
 }
+
+document.addEventListener("astro:page-load", initializeSearchPage);

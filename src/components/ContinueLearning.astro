@@ -1,5 +1,6 @@
 ---
 import { sitePath } from "../lib/site-path";
+import Icon from "./Icon.astro";
 ---
 
 <div class="resume-card" data-resume-card hidden aria-live="polite">
@@ -13,6 +14,6 @@ import { sitePath } from "../lib/site-path";
       <h2 data-resume-title>从第一节开始</h2>
       <p data-resume-copy>选择一条路线，完成第一节迁移课程。</p>
     </div>
-    <a class="button button-dark" href={sitePath("/learn")} data-resume-link>查看课程路线 <span aria-hidden="true">↗</span></a>
+    <a class="button button-dark" href={sitePath("/learn")} data-resume-link>查看课程路线 <Icon name="arrow-up-right" /></a>
   </div>
 </div>

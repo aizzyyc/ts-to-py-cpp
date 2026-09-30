@@ -1,4 +1,6 @@
 ---
+import Icon from "./Icon.astro";
+
 interface Props {
   lessonTitle: string;
   lessonSummary: string;
@@ -39,7 +41,7 @@ const promptItems = [
     {promptItems.map((item) => (
       <button class="ai-prompt-button" type="button" data-ai-prompt={item.label} data-copy-text={item.prompt}>
         <span>{item.label}</span>
-        <span aria-hidden="true">复制提示 ↗</span>
+        <span>复制提示 <Icon name="arrow-up-right" /></span>
       </button>
     ))}
   </div>

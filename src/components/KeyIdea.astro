@@ -1,4 +1,6 @@
 ---
+import Icon from "./Icon.astro";
+
 interface Props {
   title?: string;
   label?: string;
@@ -8,7 +10,7 @@ const { title = "迁移提示", label = "KEY IDEA" } = Astro.props;
 ---
 
 <aside class="key-idea">
-  <div class="key-idea-icon" aria-hidden="true">✦</div>
+  <Icon name="sparkles" class="key-idea-icon" />
   <div>
     <span class="eyebrow">{label}</span>
     <h3>{title}</h3>

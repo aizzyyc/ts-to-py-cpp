@@ -1,4 +1,6 @@
 ---
+import Icon from "./Icon.astro";
+
 interface Props {
   title?: string;
 }
@@ -7,6 +9,6 @@ const { title = "本节结论" } = Astro.props;
 ---
 
 <details class="solution-reveal" data-lesson-section="conclusion">
-  <summary><span>{title}</span><span class="summary-arrow" aria-hidden="true">↘</span></summary>
+  <summary><span>{title}</span><Icon name="chevron-down" class="summary-arrow" /></summary>
   <div class="solution-content"><slot /></div>
 </details>

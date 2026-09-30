@@ -1,6 +1,7 @@
 ---
 import { getPythonResources } from "../lib/python-resources";
 import { getCppResources } from "../lib/cpp-resources";
+import Icon from "./Icon.astro";
 
 interface Props {
   lessonId: string;
@@ -21,7 +22,7 @@ const resources = track === "python" ? getPythonResources(lessonId) : getCppReso
     {resources.map((resource) => (
       <li>
         <a href={resource.href} target="_blank" rel="noreferrer">
-          <span class="resource-title">{resource.title}<span aria-hidden="true"> ↗</span></span>
+          <span class="resource-title">{resource.title}<Icon name="arrow-up-right" /></span>
           <span class="resource-source">{resource.source}</span>
           <span class="resource-note">{resource.note}</span>
         </a>

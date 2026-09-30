@@ -12,6 +12,9 @@ import { getNextLesson, getPhaseForLesson, getPhaseLessons } from "../lib/course
 import { getActivePhaseId } from "../lib/phase-navigation";
 import { LESSONS, type Track } from "../lib/lessons";
 import { sitePath } from "../lib/site-path";
+import { requestConfirm } from "../lib/confirm-dialog";
+import { buildLessonOutline, type LessonOutlineEntry, type LessonOutlineTarget } from "../lib/lesson-outline";
+import { navigate } from "astro:transitions/client";
 
 const getStorage = (): StorageLike | null => {
   try {
@@ -22,7 +25,8 @@ const getStorage = (): StorageLike | null => {
 };
 
 const store = createProgressStore(getStorage());
-const pageTotalLessons = Number(document.querySelector<HTMLElement>("[data-progress-total]")?.dataset.progressTotal ?? 0);
+let pageController: AbortController | undefined;
+let lessonTocObserver: IntersectionObserver | undefined;
 
 function isComplete(state: ProgressState, lessonId: string): boolean {
   return state.completedLessonIds.includes(lessonId);
@@ -126,6 +130,7 @@ function renderLessonPhase(state: ProgressState): void {
 
 function render(state: ProgressState, goal: Goal | null): void {
   const visibleLessonIds = getVisibleLessonIds(goal);
+  const pageTotalLessons = Number(document.querySelector<HTMLElement>("[data-progress-total]")?.dataset.progressTotal ?? 0);
   const totalLessons = visibleLessonIds.size || pageTotalLessons;
   const completed = state.completedLessonIds.filter((id) => visibleLessonIds.size === 0 || visibleLessonIds.has(id)).length;
   document.querySelectorAll<HTMLElement>("[data-progress-count]").forEach((element) => {
@@ -192,7 +197,7 @@ function updatePhaseNavigation(): void {
   if (activePhaseId) setActivePhase(activePhaseId);
 }
 
-function initPhaseNavigation(): void {
+function initPhaseNavigation(signal: AbortSignal): void {
   const links = [...document.querySelectorAll<HTMLAnchorElement>("[data-phase-nav]")];
   if (links.length === 0) return;
 
@@ -205,9 +210,9 @@ function initPhaseNavigation(): void {
     });
   };
 
-  window.addEventListener("scroll", scheduleUpdate, { passive: true });
-  window.addEventListener("resize", scheduleUpdate);
-  window.addEventListener("hashchange", scheduleUpdate);
+  window.addEventListener("scroll", scheduleUpdate, { passive: true, signal });
+  window.addEventListener("resize", scheduleUpdate, { signal });
+  window.addEventListener("hashchange", scheduleUpdate, { signal });
   links.forEach((link) => {
     link.addEventListener("click", () => {
       const phaseId = link.dataset.phaseNav;
@@ -220,7 +225,7 @@ function initPhaseNavigation(): void {
         toggle?.setAttribute("aria-expanded", "false");
         if (toggle?.firstChild) toggle.firstChild.textContent = "打开课程路线 ";
       }
-    });
+    }, { signal });
   });
 
   updatePhaseNavigation();
@@ -233,65 +238,118 @@ function initCurrentLessonNavigation(): void {
   window.requestAnimationFrame(() => currentLesson.scrollIntoView({ block: "nearest" }));
 }
 
-function initLessonToc(): void {
+function initLessonToc(signal: AbortSignal): void {
   const toc = document.querySelector<HTMLElement>("[data-lesson-toc]");
   const content = document.querySelector<HTMLElement>("[data-lesson-content]");
   if (!toc || !content) return;
 
-  const firstHeading = content.querySelector<HTMLElement>("h2");
-  if (firstHeading) {
-    firstHeading.id = "lesson-concepts";
-    firstHeading.dataset.lessonSection = "concepts";
+  const list = toc.querySelector<HTMLOListElement>("[data-toc-list]");
+  if (!list) return;
+
+  const customLabels: Record<string, string> = {
+    code: "代码对照",
+    conclusion: "迁移结论",
+  };
+  const ids = new Set([...content.querySelectorAll<HTMLElement>("[id]")].map((element) => element.id));
+  const componentCounts = new Map<string, number>();
+  const targets: LessonOutlineTarget[] = [];
+  const targetElements = new Map<string, HTMLElement>();
+
+  content.querySelectorAll<HTMLElement>("h2, h3, [data-lesson-section]").forEach((element) => {
+    const isComponent = element.hasAttribute("data-lesson-section");
+    if (isComponent && element.querySelector("h2, h3")) return;
+
+    const sectionType = element.dataset.lessonSection ?? "";
+    const componentCount = isComponent ? (componentCounts.get(sectionType) ?? 0) + 1 : 0;
+    if (isComponent) componentCounts.set(sectionType, componentCount);
+    const headingLevel = element.tagName === "H2" ? 2 : 3;
+    const componentLabel = customLabels[sectionType] ?? element.getAttribute("aria-label") ?? element.textContent?.trim() ?? "课程内容";
+    const label = isComponent
+      ? sectionType === "code" && componentCount > 1
+        ? `${componentLabel} ${componentCount}`
+        : componentLabel
+      : element.textContent?.trim() ?? "课程内容";
+    if (!label) return;
+
+    let id = element.id;
+    if (!id) {
+      const baseId = `lesson-${sectionType || "section"}-${componentCount || 1}`;
+      id = baseId;
+      let suffix = 2;
+      while (ids.has(id)) id = `${baseId}-${suffix++}`;
+      element.id = id;
+      ids.add(id);
+    }
+
+    const level: 2 | 3 = isComponent ? 3 : headingLevel;
+    targets.push({ id, label, level });
+    targetElements.set(id, element);
+  });
+
+  const outline = buildLessonOutline(targets);
+  const visibleLinks: HTMLAnchorElement[] = [];
+  const renderEntries = (entries: LessonOutlineEntry[], nested = false): HTMLOListElement => {
+    const entryList = document.createElement("ol");
+    if (nested) entryList.className = "aside-sublist";
+
+    entries.forEach((entry) => {
+      const item = document.createElement("li");
+      const link = document.createElement("a");
+      link.href = `#${entry.id}`;
+      link.textContent = entry.label;
+      link.dataset.tocLink = entry.id;
+      visibleLinks.push(link);
+      item.append(link);
+      if (entry.children.length > 0) item.append(renderEntries(entry.children, true));
+      entryList.append(item);
+    });
+
+    return entryList;
+  };
+
+  list.replaceChildren(...renderEntries(outline).children);
+  if (visibleLinks.length === 0) {
+    toc.hidden = true;
+    return;
   }
 
-  const sections = new Map<string, HTMLElement>();
-  content.querySelectorAll<HTMLElement>("[data-lesson-section]").forEach((section) => {
-    const key = section.dataset.lessonSection;
-    if (!key) return;
-    if (sections.has(key)) return;
-    section.id = `lesson-${key}`;
-    sections.set(key, section);
-  });
-  if (firstHeading) sections.set("concepts", firstHeading);
-
-  const links = [...toc.querySelectorAll<HTMLAnchorElement>("[data-toc-link]")];
-  const visibleLinks = links.filter((link) => {
-    const key = link.dataset.tocLink;
-    const target = key ? sections.get(key) : undefined;
-    if (!target) link.closest("li")?.remove();
-    return Boolean(target);
-  });
-  if (visibleLinks.length === 0) return;
-
-  const setActive = (key: string) => {
+  const setActive = (id: string) => {
     visibleLinks.forEach((link) => {
-      const active = link.dataset.tocLink === key;
+      const active = link.dataset.tocLink === id;
       link.classList.toggle("is-active", active);
       if (active) link.setAttribute("aria-current", "location");
       else link.removeAttribute("aria-current");
     });
+
+    const activeLink = visibleLinks.find((link) => link.dataset.tocLink === id);
+    if (activeLink) {
+      const listBounds = list.getBoundingClientRect();
+      const linkBounds = activeLink.getBoundingClientRect();
+      if (linkBounds.top < listBounds.top) list.scrollTop -= listBounds.top - linkBounds.top;
+      else if (linkBounds.bottom > listBounds.bottom) list.scrollTop += linkBounds.bottom - listBounds.bottom;
+    }
   };
 
   visibleLinks.forEach((link) => {
-    link.addEventListener("click", () => {
-      const key = link.dataset.tocLink;
-      if (key) setActive(key);
-    });
+      link.addEventListener("click", () => {
+      const id = link.dataset.tocLink;
+      if (id) setActive(id);
+      }, { signal });
   });
-  setActive(visibleLinks[0].dataset.tocLink ?? "concepts");
+  setActive(visibleLinks[0].dataset.tocLink ?? "");
 
   if ("IntersectionObserver" in window) {
-    const observer = new IntersectionObserver(
+    lessonTocObserver = new IntersectionObserver(
       (entries) => {
         const visible = entries
           .filter((entry) => entry.isIntersecting)
           .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
-        const key = visible[0]?.target instanceof HTMLElement ? visible[0].target.dataset.lessonSection : undefined;
-        if (key) setActive(key);
+        const id = visible[0]?.target instanceof HTMLElement ? visible[0].target.id : undefined;
+        if (id && targetElements.has(id)) setActive(id);
       },
       { rootMargin: "-120px 0px -65% 0px", threshold: [0, 1] },
     );
-    sections.forEach((section) => observer.observe(section));
+    targetElements.forEach((section) => lessonTocObserver?.observe(section));
   }
 }
 
@@ -329,105 +387,122 @@ function showPersistenceNotice(): void {
   window.setTimeout(() => notice.remove(), 5000);
 }
 
-const initialGoal = getGoalFromLocation();
-applyRouteFilter(initialGoal);
-initPhaseNavigation();
-initCurrentLessonNavigation();
-initLessonToc();
-render(store.read(), initialGoal);
-showPersistenceNotice();
+function initializeProgressPage(): void {
+  pageController?.abort();
+  lessonTocObserver?.disconnect();
+  lessonTocObserver = undefined;
+  pageController = new AbortController();
+  const { signal } = pageController;
 
-document.querySelectorAll<HTMLElement>("[data-goal]").forEach((element) => {
-  element.addEventListener("click", () => {
-    const goal = element.dataset.goal as Goal | undefined;
-    if (!goal) return;
-    store.write(setSelectedGoal(store.read(), goal));
-    applyRouteFilter(goal);
-    render(store.read(), goal);
+  const initialGoal = getGoalFromLocation();
+  applyRouteFilter(initialGoal);
+  initPhaseNavigation(signal);
+  initCurrentLessonNavigation();
+  initLessonToc(signal);
+  render(store.read(), initialGoal);
+  showPersistenceNotice();
+
+  document.querySelectorAll<HTMLElement>("[data-goal]").forEach((element) => {
+    element.addEventListener("click", () => {
+      const goal = element.dataset.goal as Goal | undefined;
+      if (!goal) return;
+      store.write(setSelectedGoal(store.read(), goal));
+      applyRouteFilter(goal);
+      render(store.read(), goal);
+    }, { signal });
   });
-});
 
-document.querySelectorAll<HTMLAnchorElement>("a[data-lesson-id]").forEach((link) => {
-  link.addEventListener("click", () => {
-    const lessonId = link.dataset.lessonId;
-    if (!lessonId) return;
-    store.write(markLessonViewed(store.read(), lessonId));
+  document.querySelectorAll<HTMLAnchorElement>("a[data-lesson-id]").forEach((link) => {
+    link.addEventListener("click", () => {
+      const lessonId = link.dataset.lessonId;
+      if (!lessonId) return;
+      store.write(markLessonViewed(store.read(), lessonId));
+    }, { signal });
   });
-});
 
-document.querySelectorAll<HTMLElement>("[data-clear-goal]").forEach((element) => {
-  element.addEventListener("click", () => {
-    store.write({ ...store.read(), selectedGoal: null, updatedAt: new Date().toISOString() });
+  document.querySelectorAll<HTMLElement>("[data-clear-goal]").forEach((element) => {
+    element.addEventListener("click", () => {
+      store.write({ ...store.read(), selectedGoal: null, updatedAt: new Date().toISOString() });
+    }, { signal });
   });
-});
 
-document.querySelectorAll<HTMLButtonElement>("[data-complete-lesson]").forEach((button) => {
-  button.addEventListener("click", () => {
-    const lessonId = button.dataset.completeLesson;
-    if (!lessonId) return;
-    const state = store.read();
-    const nextState = isComplete(state, lessonId)
-      ? {
-          ...state,
-          completedLessonIds: state.completedLessonIds.filter((id) => id !== lessonId),
-          lastLessonId: state.lastLessonId === lessonId ? null : state.lastLessonId,
-          updatedAt: new Date().toISOString(),
-        }
-      : markLessonComplete(state, lessonId);
-    store.write(nextState);
-    render(store.read(), getGoalFromLocation());
+  document.querySelectorAll<HTMLButtonElement>("[data-complete-lesson]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const lessonId = button.dataset.completeLesson;
+      if (!lessonId) return;
+      const state = store.read();
+      const nextState = isComplete(state, lessonId)
+        ? {
+            ...state,
+            completedLessonIds: state.completedLessonIds.filter((id) => id !== lessonId),
+            lastLessonId: state.lastLessonId === lessonId ? null : state.lastLessonId,
+            updatedAt: new Date().toISOString(),
+          }
+        : markLessonComplete(state, lessonId);
+      store.write(nextState);
+      render(store.read(), getGoalFromLocation());
+    }, { signal });
   });
-});
 
-document.querySelectorAll<HTMLElement>("[data-reset-progress]").forEach((element) => {
-  element.addEventListener("click", () => {
-    if (!window.confirm("确定要清除这台设备上的 LangShift 学习进度吗？")) return;
-    store.reset();
-    render(store.read(), getGoalFromLocation());
+  document.querySelectorAll<HTMLAnchorElement>("[data-reset-progress]").forEach((element) => {
+    element.addEventListener("click", async (event) => {
+      event.preventDefault();
+      const confirmed = await requestConfirm({
+        title: "清除学习进度",
+        message: "这会清除这台设备上的 LangShift 学习进度，且无法撤销。确定继续吗？",
+        confirmLabel: "清除进度",
+        cancelLabel: "取消",
+      });
+      if (!confirmed) return;
+      store.reset();
+      await navigate(element.href);
+    }, { signal });
   });
-});
 
-document.querySelectorAll<HTMLButtonElement>("[data-route-toggle]").forEach((button) => {
-  button.addEventListener("click", () => {
-    const sidebar = button.closest<HTMLElement>(".route-sidebar");
-    if (!sidebar) return;
-    const expanded = sidebar.classList.toggle("is-open");
-    button.setAttribute("aria-expanded", String(expanded));
-    button.firstChild!.textContent = expanded ? "收起课程路线 " : "打开课程路线 ";
+  document.querySelectorAll<HTMLButtonElement>("[data-route-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const sidebar = button.closest<HTMLElement>(".route-sidebar");
+      if (!sidebar) return;
+      const expanded = sidebar.classList.toggle("is-open");
+      button.setAttribute("aria-expanded", String(expanded));
+      button.firstChild!.textContent = expanded ? "收起课程路线 " : "打开课程路线 ";
+    }, { signal });
   });
-});
 
-document.querySelectorAll<HTMLButtonElement>("[data-copy-code]").forEach((button) => {
-  button.addEventListener("click", async () => {
-    const code = button.dataset.code ?? "";
-    try {
-      await navigator.clipboard.writeText(code);
-      button.textContent = "已复制";
-      window.setTimeout(() => (button.textContent = "复制"), 1400);
-    } catch {
-      button.textContent = "请手动复制";
-      window.setTimeout(() => (button.textContent = "复制"), 1600);
-    }
+  document.querySelectorAll<HTMLButtonElement>("[data-copy-code]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const code = button.dataset.code ?? "";
+      try {
+        await navigator.clipboard.writeText(code);
+        button.textContent = "已复制";
+        window.setTimeout(() => (button.textContent = "复制"), 1400);
+      } catch {
+        button.textContent = "请手动复制";
+        window.setTimeout(() => (button.textContent = "复制"), 1600);
+      }
+    }, { signal });
   });
-});
 
-document.querySelectorAll<HTMLButtonElement>("[data-copy-text]").forEach((button) => {
-  const originalLabel = button.innerHTML;
-  button.addEventListener("click", async () => {
-    const prompt = button.dataset.copyText ?? "";
-    try {
-      await navigator.clipboard.writeText(prompt);
-      button.innerHTML = "<span>已复制</span><span aria-hidden=\"true\">✓</span>";
-      window.setTimeout(() => (button.innerHTML = originalLabel), 1400);
-    } catch {
-      button.innerHTML = "<span>请手动复制</span><span aria-hidden=\"true\">↗</span>";
-      window.setTimeout(() => (button.innerHTML = originalLabel), 1600);
-    }
+  document.querySelectorAll<HTMLButtonElement>("[data-copy-text]").forEach((button) => {
+    const originalLabel = button.innerHTML;
+    button.addEventListener("click", async () => {
+      const prompt = button.dataset.copyText ?? "";
+      try {
+        await navigator.clipboard.writeText(prompt);
+        button.innerHTML = "<span>已复制</span><span aria-hidden=\"true\">✓</span>";
+        window.setTimeout(() => (button.innerHTML = originalLabel), 1400);
+      } catch {
+        button.innerHTML = "<span>请手动复制</span><span aria-hidden=\"true\">↗</span>";
+        window.setTimeout(() => (button.innerHTML = originalLabel), 1600);
+      }
+    }, { signal });
   });
-});
 
-document.addEventListener("keydown", (event) => {
-  if (event.key !== "/" || ["INPUT", "TEXTAREA"].includes((event.target as HTMLElement)?.tagName)) return;
-  event.preventDefault();
-    window.location.href = sitePath("/search");
-});
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "/" || ["INPUT", "TEXTAREA"].includes((event.target as HTMLElement)?.tagName)) return;
+    event.preventDefault();
+    void navigate(sitePath("/search"));
+  }, { signal });
+}
+
+document.addEventListener("astro:page-load", initializeProgressPage);

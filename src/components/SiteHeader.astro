@@ -1,6 +1,7 @@
 ---
 import { sitePath } from "../lib/site-path";
 import { getPrimaryNavSection } from "../lib/primary-navigation";
+import Icon from "./Icon.astro";
 
 const pathname = Astro.url.pathname;
 const currentSection = getPrimaryNavSection(pathname, import.meta.env.BASE_URL);
@@ -26,16 +27,16 @@ const currentSection = getPrimaryNavSection(pathname, import.meta.env.BASE_URL);
       <a href={sitePath("/#method")} data-nav-method>学习方法</a>
     </nav>
     <button class="mobile-menu-toggle" type="button" data-mobile-menu-toggle aria-expanded="false" aria-controls="mobile-nav">
-      <span class="mobile-menu-icon" aria-hidden="true">☰</span>
+      <Icon name="menu" class="mobile-menu-icon" />
       <span>菜单</span>
     </button>
     <div class="header-actions">
       <a class="header-search" href={sitePath("/search")} aria-label="搜索课程">
-        <span class="search-glyph" aria-hidden="true">⌕</span>
+        <Icon name="search" class="search-glyph" />
         <span class="search-label">搜索</span>
         <kbd>/</kbd>
       </a>
-      <a class="button button-small button-dark" href={sitePath("/learn")}>开始学习 <span aria-hidden="true">↗</span></a>
+      <a class="button button-small button-dark" href={sitePath("/learn")}>开始学习 <Icon name="arrow-up-right" /></a>
     </div>
   </div>
   <nav id="mobile-nav" class="mobile-nav" data-mobile-nav hidden aria-label="移动端主导航">
@@ -48,57 +49,58 @@ const currentSection = getPrimaryNavSection(pathname, import.meta.env.BASE_URL);
 <script>
   import { isCurrentHashTarget } from "../lib/primary-navigation";
 
-  const methodLinks = [...document.querySelectorAll<HTMLAnchorElement>("[data-nav-method]")];
+  const syncMethodNavigation = () => {
+    document.querySelectorAll<HTMLAnchorElement>("[data-nav-method]").forEach((methodLink) => {
+      const target = new URL(methodLink.href, window.location.href);
+      const isCurrent = isCurrentHashTarget(
+        window.location.pathname,
+        window.location.hash,
+        target.pathname,
+        target.hash,
+      );
 
-  if (methodLinks.length > 0) {
-    const updateMethodLink = () => {
-      methodLinks.forEach((methodLink) => {
-        const target = new URL(methodLink.href, window.location.href);
-        const isCurrent = isCurrentHashTarget(
-          window.location.pathname,
-          window.location.hash,
-          target.pathname,
-          target.hash,
-        );
+      methodLink.classList.toggle("is-active", isCurrent);
+      if (isCurrent) methodLink.setAttribute("aria-current", "location");
+      else methodLink.removeAttribute("aria-current");
+    });
 
-        methodLink.classList.toggle("is-active", isCurrent);
-        if (isCurrent) methodLink.setAttribute("aria-current", "location");
-        else methodLink.removeAttribute("aria-current");
-      });
-    };
-
-    const syncMethodNavigation = () => {
-      updateMethodLink();
-      if (window.location.hash !== "#method") return;
-
+    if (window.location.hash === "#method") {
       window.requestAnimationFrame(() => {
         document.getElementById("method")?.scrollIntoView({ block: "start" });
       });
-    };
+    }
+  };
 
-    syncMethodNavigation();
-    window.addEventListener("hashchange", syncMethodNavigation);
-    window.addEventListener("pageshow", syncMethodNavigation);
-    window.addEventListener("load", syncMethodNavigation, { once: true });
-  }
+  const closeMobileMenu = () => {
+    const menuToggle = document.querySelector<HTMLButtonElement>("[data-mobile-menu-toggle]");
+    const mobileNav = document.querySelector<HTMLElement>("[data-mobile-nav]");
+    if (!menuToggle || !mobileNav) return;
+    mobileNav.hidden = true;
+    menuToggle.setAttribute("aria-expanded", "false");
+  };
 
-  const menuToggle = document.querySelector<HTMLButtonElement>("[data-mobile-menu-toggle]");
-  const mobileNav = document.querySelector<HTMLElement>("[data-mobile-nav]");
+  document.addEventListener("astro:page-load", syncMethodNavigation);
+  window.addEventListener("hashchange", syncMethodNavigation);
+  window.addEventListener("pageshow", syncMethodNavigation);
 
-  if (menuToggle && mobileNav) {
-    const closeMenu = () => {
-      mobileNav.hidden = true;
-      menuToggle.setAttribute("aria-expanded", "false");
-    };
+  document.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
 
-    menuToggle.addEventListener("click", () => {
+    const menuToggle = target.closest<HTMLButtonElement>("[data-mobile-menu-toggle]");
+    if (menuToggle) {
+      const mobileNav = document.querySelector<HTMLElement>("[data-mobile-nav]");
+      if (!mobileNav) return;
       const isOpen = !mobileNav.hidden;
       mobileNav.hidden = isOpen;
       menuToggle.setAttribute("aria-expanded", String(!isOpen));
-    });
-    mobileNav.querySelectorAll("a").forEach((link) => link.addEventListener("click", closeMenu));
-    document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") closeMenu();
-    });
-  }
+      return;
+    }
+
+    if (target.closest("[data-mobile-nav] a")) closeMobileMenu();
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeMobileMenu();
+  });
 </script>

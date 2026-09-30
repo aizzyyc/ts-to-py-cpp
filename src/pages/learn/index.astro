@@ -1,5 +1,6 @@
 ---
 import BaseLayout from "../../layouts/BaseLayout.astro";
+import Icon from "../../components/Icon.astro";
 import ContinueLearning from "../../components/ContinueLearning.astro";
 import ProgressIndicator from "../../components/ProgressIndicator.astro";
 import RouteSidebar from "../../components/RouteSidebar.astro";
@@ -59,7 +60,7 @@ const routeStats = tracks.map((track) => ({ track, stats: getLessonClassificatio
                 return <details class:list={["track-subsection", { "phase-project": phase.project }]} id={phase.id} open={phase.startOrder === 1} tabindex="-1" aria-labelledby={`phase-heading-${phase.id}`} data-phase-id={phase.id} data-phase-track={track} data-overview-phase>
                   <summary class="track-section-header">
                     <div class="track-title-wrap"><span class:list={["track-dot", track]}></span><div><span class="phase-kind">{phase.project ? "结课项目" : "学习阶段"}</span><h2 id={`phase-heading-${phase.id}`}>{phase.title}</h2><p>{phase.description}</p></div></div>
-                    <span class="track-count">{lessons.length} LESSONS <span class="phase-toggle" aria-hidden="true">+</span></span>
+                    <span class="track-count">{lessons.length} LESSONS <Icon name="plus" class="phase-toggle" /></span>
                   </summary>
                   <div class="phase-meta">
                     <span data-phase-progress data-phase-total={lessons.length}>0/{lessons.length}</span>
@@ -72,7 +73,7 @@ const routeStats = tracks.map((track) => ({ track, stats: getLessonClassificatio
                       <span class="course-index">{String(lesson.order).padStart(2, "0")}</span>
                       <span class="course-copy"><h3>{lesson.title}</h3><p>{lesson.summary}</p></span>
                       <span class="course-tags">{lesson.concepts.slice(0, 2).map((concept) => <span class="tag">{concept}</span>)}<LessonLevelBadge {...getLessonClassification(lesson)} /></span>
-                      <span class="course-arrow" aria-hidden="true">↗</span>
+                      <Icon name="arrow-up-right" class="course-arrow" />
                     </a>)}
                   </div>
                 </details>;

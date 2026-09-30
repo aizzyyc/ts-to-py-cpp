@@ -3,6 +3,7 @@ import type { LessonMeta, Track } from "../lib/lessons";
 import { TRACK_DESCRIPTIONS, TRACK_LABELS } from "../lib/lessons";
 import { getCoursePhases, getPhaseForLesson, getPhaseLessons } from "../lib/course-flow";
 import { sitePath } from "../lib/site-path";
+import Icon from "./Icon.astro";
 
 interface Props {
   lessons: LessonMeta[];
@@ -26,7 +27,7 @@ const currentPhaseId = currentLesson ? getPhaseForLesson(currentLesson)?.id : un
     </div>
     <span class="sidebar-count" data-progress-count>0/{lessons.length}</span>
   </div>
-  <button class="mobile-route-toggle" type="button" data-route-toggle aria-expanded="false">打开课程路线 <span aria-hidden="true">↘</span></button>
+  <button class="mobile-route-toggle" type="button" data-route-toggle aria-expanded="false">打开课程路线 <Icon name="chevron-down" /></button>
   <div class="sidebar-progress" aria-hidden="true"><span data-progress-bar></span></div>
 
   <div class="route-groups">
@@ -54,7 +55,7 @@ const currentPhaseId = currentLesson ? getPhaseForLesson(currentLesson)?.id : un
               </div>
             ) : (
                 <details class:list={["route-subgroup", "route-subgroup-details", { "is-project": phase.project }]} data-route-section={phase.id} data-phase-id={phase.id} data-phase-track={track} open={phase.id === currentPhaseId}>
-                  <summary class="route-subgroup-title"><span>{phase.title}</span><span class="group-count">{phaseLessons.length}</span><span class="phase-toggle" aria-hidden="true">+</span></summary>
+                  <summary class="route-subgroup-title"><span>{phase.title}</span><span class="group-count">{phaseLessons.length}</span><Icon name="chevron-down" class="phase-toggle" /></summary>
                   <ol class="lesson-list">
                     {phaseLessons.map((lesson) => (
                       <li>
@@ -64,7 +65,7 @@ const currentPhaseId = currentLesson ? getPhaseForLesson(currentLesson)?.id : un
                           data-lesson-id={lesson.id}
                           aria-current={lesson.id === currentLessonId ? "page" : undefined}
                         >
-                          <span class="lesson-status" aria-hidden="true">{lesson.id === currentLessonId ? "→" : "○"}</span>
+                          <span class="lesson-status">{lesson.id === currentLessonId ? <Icon name="arrow-right" /> : <Icon name="circle" />}</span>
                           <span class="lesson-link-copy">
                             <span>{lesson.title}</span>
                             <small>{lesson.durationMinutes} min</small>

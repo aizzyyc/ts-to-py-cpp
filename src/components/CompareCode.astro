@@ -1,4 +1,6 @@
 ---
+import Icon from "./Icon.astro";
+
 interface Props {
   sourceLabel: string;
   sourceLanguage: string;
@@ -22,7 +24,7 @@ const { sourceLabel, sourceLanguage, source, targetLabel, targetLanguage, target
       <div class="code-pane-header"><span class="language-dot source"></span>{sourceLabel}<button class="copy-button" data-copy-code data-code={source} type="button">复制</button></div>
       <pre><code class={`language-${sourceLanguage}`}>{source}</code></pre>
     </div>
-    <div class="compare-arrow" aria-hidden="true">→</div>
+    <div class="compare-arrow"><Icon name="code-compare" /></div>
     <div class="code-pane target-pane">
       <div class="code-pane-header"><span class="language-dot target"></span>{targetLabel}<button class="copy-button" data-copy-code data-code={target} type="button">复制</button></div>
       <pre><code class={`language-${targetLanguage}`}>{target}</code></pre>

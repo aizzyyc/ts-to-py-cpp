@@ -1,6 +1,7 @@
 ---
 import type { LessonMeta } from "../lib/lessons";
 import { sitePath } from "../lib/site-path";
+import Icon from "./Icon.astro";
 
 interface Props {
   currentLessonId: string;
@@ -13,18 +14,18 @@ const { currentLessonId, previous, next } = Astro.props;
 
 <div class="lesson-nav">
   <button class="button complete-button" type="button" data-complete-lesson={currentLessonId}>
-    <span class="complete-icon" aria-hidden="true">✓</span>
+    <Icon name="check" class="complete-icon" />
     <span data-complete-label>标记为已完成</span>
   </button>
   <div class="lesson-nav-links">
     {previous ? (
       <a class="nav-link previous" href={sitePath(`/learn/${previous.track}/${previous.slug}`)}>
-        <span aria-hidden="true">←</span><span><small>上一节</small>{previous.title}</span>
+        <Icon name="arrow-left" /><span><small>上一节</small>{previous.title}</span>
       </a>
     ) : <span></span>}
     {next && (
       <a class="nav-link next" href={sitePath(`/learn/${next.track}/${next.slug}`)} data-next-lesson={next.id}>
-        <span><small>下一节</small>{next.title}</span><span aria-hidden="true">→</span>
+        <span><small>下一节</small>{next.title}</span><Icon name="arrow-right" />
       </a>
     )}
   </div>

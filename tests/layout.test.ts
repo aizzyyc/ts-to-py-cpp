@@ -7,12 +7,46 @@ const styles = await readFile(new URL("../src/styles/global.css", import.meta.ur
 test("learn route and course catalog use separate responsive layout columns", () => {
   assert.match(
     styles,
-    /\.learn-layout\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*238px\s+minmax\(0,\s*1fr\)/s,
+    /\.learn-layout\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*250px\s+minmax\(0,\s*1fr\)/s,
   );
   assert.match(
     styles,
     /@media\s*\(max-width:\s*760px\)\s*\{[\s\S]*?\.learn-layout\s*\{\s*display:\s*block;/,
   );
+});
+
+test("route sidebar text and links use readable sizes and touch targets", () => {
+  const rootVariables = styles.match(/:root\s*\{([^}]*)\}/)?.[1] ?? "";
+  const rule = (selector: string) =>
+    styles.match(new RegExp(`${selector.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
+  const lessonLink = rule(".lesson-link");
+  const phaseTitle = rule(".route-subgroup-title");
+  const routeDescription = rule(".route-description");
+  const lessonDuration = rule(".lesson-link-copy small");
+
+  assert.match(rootVariables, /--type-ui:\s*14px/);
+  assert.match(rootVariables, /--type-label:\s*13px/);
+  assert.match(rootVariables, /--type-caption:\s*12px/);
+  assert.match(lessonLink, /font-size:\s*var\(--type-ui\)/);
+  assert.match(lessonLink, /min-height:\s*40px/);
+  assert.match(phaseTitle, /font-size:\s*var\(--type-ui\)/);
+  assert.match(routeDescription, /font-size:\s*var\(--type-caption\)/);
+  assert.match(lessonDuration, /font-size:\s*var\(--type-caption\)/);
+});
+
+test("primary interface icons use the shared inline icon treatment", async () => {
+  const header = await readFile(new URL("../src/components/SiteHeader.astro", import.meta.url), "utf8");
+  const sidebar = await readFile(new URL("../src/components/RouteSidebar.astro", import.meta.url), "utf8");
+  const homepage = await readFile(new URL("../src/pages/index.astro", import.meta.url), "utf8");
+  const icon = await readFile(new URL("../src/components/Icon.astro", import.meta.url), "utf8").catch(() => "");
+
+  assert.match(header, /<Icon name=/);
+  assert.match(sidebar, /<Icon name=/);
+  assert.match(homepage, /<Icon name=/);
+  assert.match(icon, /<svg class:list=\{\["icon"/);
+  assert.match(icon, /viewBox="0 0 24 24"/);
+  assert.match(icon, /stroke="currentColor"/);
+  assert.doesNotMatch(sidebar, /aria-hidden="true">(?:→|○|↘|\+)/);
 });
 
 test("learn page exposes resume and phase progress hooks", async () => {
@@ -161,6 +195,18 @@ test("active primary navigation uses a quiet underline instead of a filled pill"
   assert.match(indicatorRule, /background:\s*var\(--blue\)/);
 });
 
+test("active desktop navigation does not change label typography or width", () => {
+  const activeRule = styles.match(/\.desktop-nav a\.is-active\s*\{([^}]*)\}/)?.[1] ?? "";
+
+  assert.doesNotMatch(activeRule, /(?:font-weight|font-size|letter-spacing)\s*:/);
+});
+
+test("page navigation reserves a stable scrollbar gutter across routes", () => {
+  const rootRule = styles.match(/html\s*\{([^}]*)\}/)?.[1] ?? "";
+
+  assert.match(rootRule, /scrollbar-gutter:\s*stable/);
+});
+
 test("lesson previous and next links keep arrows beside their titles and stack on narrow screens", () => {
   const linkRule = styles.match(/\.nav-link\s*\{([^}]*)\}/)?.[1] ?? "";
   const nextRule = styles.match(/\.nav-link\.next\s*\{([^}]*)\}/)?.[1] ?? "";
@@ -185,7 +231,78 @@ test("lesson overview exposes real anchors and scroll-synced active sections", a
   assert.match(exercise, /data-lesson-section="exercise"/);
   assert.match(solution, /data-lesson-section="conclusion"/);
   assert.match(client, /IntersectionObserver/);
-  assert.match(client, /data-toc-link/);
+  assert.match(client, /dataset\.tocLink = entry\.id/);
+});
+
+const lessonOutline = await import("../src/lib/lesson-outline.ts").catch(() => null);
+
+test("lesson overview nests every subsection under its nearest section heading", () => {
+  assert.ok(lessonOutline, "lesson outline should be generated from the section headings");
+  if (!lessonOutline) return;
+
+  const outline = lessonOutline.buildLessonOutline([
+    { id: "goals", label: "学习目标", level: 2 },
+    { id: "migration", label: "迁移心智模型", level: 2 },
+    { id: "initialization", label: "初始化规则", level: 3 },
+    { id: "comparison", label: "代码对照", level: 3 },
+    { id: "practice", label: "动手练习", level: 2 },
+    { id: "exercise", label: "边界采样器", level: 3 },
+  ]);
+
+  assert.deepEqual(outline, [
+    { id: "goals", label: "学习目标", children: [] },
+    {
+      id: "migration",
+      label: "迁移心智模型",
+      children: [
+        { id: "initialization", label: "初始化规则", children: [] },
+        { id: "comparison", label: "代码对照", children: [] },
+      ],
+    },
+    {
+      id: "practice",
+      label: "动手练习",
+      children: [{ id: "exercise", label: "边界采样器", children: [] }],
+    },
+  ]);
+});
+
+test("lesson page lets its content generate the overview instead of hiding sections", async () => {
+  const page = await readFile(new URL("../src/pages/learn/[track]/[slug].astro", import.meta.url), "utf8");
+  const client = await readFile(new URL("../src/scripts/progress-client.ts", import.meta.url), "utf8");
+  const styles = await readFile(new URL("../src/styles/global.css", import.meta.url), "utf8");
+
+  assert.match(page, /<ol class="aside-list" data-toc-list[^>]*><\/ol>/);
+  assert.match(client, /querySelectorAll<HTMLElement>\("h2, h3, \[data-lesson-section\]"\)/);
+  assert.match(client, /buildLessonOutline\(/);
+  assert.match(styles, /\.aside-list\s*\{[^}]*max-height:[^}]*overflow-y:\s*auto/s);
+  assert.match(styles, /\.aside-sublist\s*\{/);
+  assert.match(styles, /\.aside-list a\s*\{[^}]*font-size:\s*var\(--type-ui\)/s);
+});
+
+test("internal navigation reinitializes page interactions after each client-side route change", async () => {
+  const layout = await readFile(new URL("../src/layouts/BaseLayout.astro", import.meta.url), "utf8");
+  const client = await readFile(new URL("../src/scripts/progress-client.ts", import.meta.url), "utf8");
+  const search = await readFile(new URL("../src/scripts/search-client.ts", import.meta.url), "utf8");
+  const header = await readFile(new URL("../src/components/SiteHeader.astro", import.meta.url), "utf8");
+
+  assert.match(layout, /import \{ ClientRouter \} from "astro:transitions"/);
+  assert.match(layout, /<ClientRouter\s+fallback="swap"\s*\/>/);
+  assert.match(layout, /<html[^>]*transition:animate="none"/);
+  assert.match(client, /document\.addEventListener\("astro:page-load", initializeProgressPage\)/);
+  assert.match(search, /document\.addEventListener\("astro:page-load", initializeSearchPage\)/);
+  assert.match(header, /document\.addEventListener\("astro:page-load", syncMethodNavigation\)/);
+  assert.match(client, /pageController\?\.abort\(\)/);
+  assert.match(client, /import \{ navigate \} from "astro:transitions\/client"/);
+  assert.match(client, /void navigate\(sitePath\("\/search"\)\)/);
+  assert.doesNotMatch(client, /window\.location\.href\s*=/);
+});
+
+test("learning and search pages share a top inset to keep header navigation visually aligned", () => {
+  assert.match(styles, /--page-top-inset:\s*62px/);
+  assert.match(styles, /\.learn-hero\s*\{[^}]*padding:\s*var\(--page-top-inset\)\s+0/s);
+  assert.match(styles, /\.search-page\s*\{[^}]*padding:\s*var\(--page-top-inset\)\s+0/s);
+  assert.match(styles, /@media\s*\(max-width:\s*760px\)[\s\S]*?--page-top-inset:\s*46px/s);
 });
 
 test("mobile code comparison explains how to read long lines", async () => {
@@ -259,4 +376,23 @@ test("study method provides a timed routine, concrete outputs, and a recovery pa
   assert.ok(studyMethod.STUDY_STEPS.every((step) => step.title && step.action && step.output));
   assert.equal(studyMethod.DEBUGGING_STEPS.length, 4);
   assert.ok(studyMethod.REVIEW_GUIDANCE.length > 40);
+});
+
+test("progress reset uses the shared accessible confirmation dialog", async () => {
+  const layout = await readFile(new URL("../src/layouts/BaseLayout.astro", import.meta.url), "utf8");
+  const dialog = await readFile(new URL("../src/components/ConfirmDialog.astro", import.meta.url), "utf8");
+  const confirmation = await readFile(new URL("../src/lib/confirm-dialog.ts", import.meta.url), "utf8");
+  const client = await readFile(new URL("../src/scripts/progress-client.ts", import.meta.url), "utf8");
+
+  assert.match(layout, /<ConfirmDialog\s*\/>/);
+  assert.match(dialog, /<dialog[^>]*data-confirm-dialog[^>]*aria-labelledby=/);
+  assert.match(dialog, /data-confirm-cancel/);
+  assert.match(dialog, /data-confirm-accept/);
+  assert.match(confirmation, /export function requestConfirm/);
+  assert.match(client, /await requestConfirm\(/);
+  assert.match(client, /event\.preventDefault\(\)/);
+  assert.match(client, /if \(!confirmed\) return/);
+  assert.match(client, /await navigate\(element\.href\)/);
+  assert.doesNotMatch(client, /window\.location\.assign\(/);
+  assert.doesNotMatch(client, /window\.confirm\(/);
 });
