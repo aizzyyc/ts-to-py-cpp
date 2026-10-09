@@ -4,14 +4,13 @@ import { getCollection } from "astro:content";
 import { sitePath } from "../lib/site-path";
 
 const lessons = await getCollection("lessons");
-const searchEntries = lessons.map(({ data, body }) => ({
+const searchEntries = lessons.map(({ data }) => ({
   id: data.id,
   slug: data.slug,
   title: data.title,
   summary: data.summary,
   track: data.track,
   concepts: data.concepts,
-  content: body ?? "",
 }));
 const searchIndex = JSON.stringify(searchEntries).replace(/</g, "\\u003c");
 const searchSuggestions = ["Promise", "RAII", "vector", "数据处理"];

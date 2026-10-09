@@ -1,8 +1,37 @@
 import { TRACK_LABELS, type Track } from "../lib/lessons";
-import { searchLessons, type SearchEntry } from "../lib/search";
+import { prepareSearchIndex, searchPreparedLessons, type SearchEntry, type SearchIndex } from "../lib/search";
 import { sitePath } from "../lib/site-path";
 
 let searchController: AbortController | undefined;
+let fullTextIndexPromise: Promise<SearchIndex> | undefined;
+let fullTextIndexCache: SearchIndex | undefined;
+
+interface FullTextSearchEntry {
+  id: string;
+  content: string;
+}
+
+function loadFullTextIndex(entries: SearchEntry[]): Promise<SearchIndex> {
+  if (!fullTextIndexPromise) {
+    fullTextIndexPromise = fetch(sitePath("/search-index.json"))
+      .then((response) => {
+        if (!response.ok) throw new Error("课程正文索引加载失败");
+        return response.json() as Promise<FullTextSearchEntry[]>;
+      })
+      .then((fullTextEntries) => {
+        const contentById = new Map(fullTextEntries.map(({ id, content }) => [id, content] as const));
+        const index = prepareSearchIndex(entries.map((entry) => ({ ...entry, content: contentById.get(entry.id) ?? "" })));
+        fullTextIndexCache = index;
+        return index;
+      })
+      .catch((error: unknown) => {
+        fullTextIndexPromise = undefined;
+        throw error;
+      });
+  }
+
+  return fullTextIndexPromise;
+}
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>'"]/g, (character) => {
@@ -30,19 +59,23 @@ function initializeSearchPage(): void {
 
   if (!indexElement || !form || !input || !status || !resultsContainer) return;
 
+  const searchForm = form;
   const searchStatus = status;
   const searchResults = resultsContainer;
   const controller = new AbortController();
   searchController = controller;
   const { signal } = controller;
   let entries: SearchEntry[] = [];
+  let searchVersion = 0;
   try {
     entries = JSON.parse(indexElement.textContent ?? "[]") as SearchEntry[];
   } catch {
     searchStatus.textContent = "课程索引加载失败，请刷新页面重试。";
   }
+  const metadataIndex = prepareSearchIndex(entries);
 
   function render(query: string): void {
+    const currentSearchVersion = ++searchVersion;
     const trimmedQuery = query.trim();
     if (suggestionsContainer) suggestionsContainer.hidden = Boolean(trimmedQuery);
     if (!trimmedQuery) {
@@ -51,8 +84,30 @@ function initializeSearchPage(): void {
       return;
     }
 
-    const results = searchLessons(entries, trimmedQuery);
-    searchStatus.textContent = results.length ? `找到 ${results.length} 节相关课程` : "没有找到匹配课程，试试更短的关键词。";
+    if (fullTextIndexCache) {
+      renderResults(searchPreparedLessons(fullTextIndexCache, trimmedQuery));
+      return;
+    }
+
+    const metadataResults = searchPreparedLessons(metadataIndex, trimmedQuery);
+    renderResults(metadataResults, "正在搜索课程正文…", false);
+
+    void loadFullTextIndex(entries)
+      .then((fullTextIndex) => {
+        if (signal.aborted || currentSearchVersion !== searchVersion || !searchForm.isConnected) return;
+        renderResults(searchPreparedLessons(fullTextIndex, trimmedQuery));
+      })
+      .catch(() => {
+        if (signal.aborted || currentSearchVersion !== searchVersion || !searchForm.isConnected) return;
+        searchStatus.textContent = metadataResults.length
+          ? `找到 ${metadataResults.length} 节标题、摘要或概念匹配课程；正文索引暂不可用。`
+          : "正文索引加载失败，请稍后重试，或尝试搜索标题、摘要和概念。";
+      });
+  }
+
+  function renderResults(results: SearchEntry[], statusMessage?: string, showEmptyState = true): void {
+    searchStatus.textContent = statusMessage
+      ?? (results.length ? `找到 ${results.length} 节相关课程` : "没有找到匹配课程，试试更短的关键词。");
     searchResults.innerHTML = results.length
       ? results.map((entry) => {
           const track = entry.track as Track;
@@ -62,7 +117,7 @@ function initializeSearchPage(): void {
             <p>${escapeHtml(entry.summary)}</p>
           </a>`;
         }).join("")
-      : '<p class="search-empty">还没有匹配结果。可以搜索 `Promise`、`unique_ptr`、`NumPy` 或“数据处理”。</p>';
+      : showEmptyState ? '<p class="search-empty">还没有匹配结果。可以搜索 `Promise`、`unique_ptr`、`NumPy` 或“数据处理”。</p>' : "";
   }
 
   const initialQuery = new URLSearchParams(window.location.search).get("q") ?? "";

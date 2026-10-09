@@ -7,24 +7,45 @@ export interface SearchEntry {
   summary: string;
   track: Track;
   concepts: string[];
+  content?: string;
+}
+
+interface SearchDocument {
+  entry: SearchEntry;
+  title: string;
+  summary: string;
+  concepts: string;
   content: string;
+}
+
+export interface SearchIndex {
+  documents: SearchDocument[];
 }
 
 function normalize(value: string): string {
   return value.toLocaleLowerCase("zh-CN").replace(/\s+/g, " ").trim();
 }
 
-export function searchLessons(entries: SearchEntry[], query: string): SearchEntry[] {
+export function prepareSearchIndex(entries: SearchEntry[]): SearchIndex {
+  return {
+    documents: entries.map((entry) => ({
+      entry,
+      title: normalize(entry.title),
+      summary: normalize(entry.summary),
+      concepts: normalize(entry.concepts.join(" ")),
+      content: normalize(entry.content ?? ""),
+    })),
+  };
+}
+
+export function searchPreparedLessons(index: SearchIndex, query: string): SearchEntry[] {
   const normalizedQuery = normalize(query);
   if (!normalizedQuery) return [];
 
   const terms = normalizedQuery.split(" ").filter(Boolean);
-  return entries
-    .map((entry) => {
-      const title = normalize(entry.title);
-      const summary = normalize(entry.summary);
-      const concepts = normalize(entry.concepts.join(" "));
-      const content = normalize(entry.content);
+  return index.documents
+    .map((document) => {
+      const { entry, title, summary, concepts, content } = document;
       const fields = [title, summary, concepts, content];
       if (!terms.every((term) => fields.some((field) => field.includes(term)))) return null;
 
@@ -40,4 +61,8 @@ export function searchLessons(entries: SearchEntry[], query: string): SearchEntr
     .filter((result): result is { entry: SearchEntry; score: number } => result !== null)
     .sort((a, b) => b.score - a.score || a.entry.title.localeCompare(b.entry.title, "zh-CN"))
     .map(({ entry }) => entry);
+}
+
+export function searchLessons(entries: SearchEntry[], query: string): SearchEntry[] {
+  return searchPreparedLessons(prepareSearchIndex(entries), query);
 }
