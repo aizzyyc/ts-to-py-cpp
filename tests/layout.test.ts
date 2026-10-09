@@ -24,9 +24,9 @@ test("route sidebar text and links use readable sizes and touch targets", () => 
   const routeDescription = rule(".route-description");
   const lessonDuration = rule(".lesson-link-copy small");
 
-  assert.match(rootVariables, /--type-ui:\s*14px/);
-  assert.match(rootVariables, /--type-label:\s*13px/);
-  assert.match(rootVariables, /--type-caption:\s*12px/);
+  assert.match(rootVariables, /--type-ui:\s*15px/);
+  assert.match(rootVariables, /--type-label:\s*14px/);
+  assert.match(rootVariables, /--type-caption:\s*13px/);
   assert.match(lessonLink, /font-size:\s*var\(--type-ui\)/);
   assert.match(lessonLink, /min-height:\s*40px/);
   assert.match(phaseTitle, /font-size:\s*var\(--type-ui\)/);

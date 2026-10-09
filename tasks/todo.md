@@ -417,4 +417,4 @@
 - 搜索页 HTML 从 942,294 字节缩至 32,764 字节（减少约 96.5%）；元数据仍包含全部 92 节课程，正文全文索引单独生成约 903 KB 的 JSON，仅在首次非空搜索时加载。
 - 全文索引在页面内存中规范化并缓存，保留原有标题、概念、摘要、正文匹配和排序权重；请求使用 `sitePath` 兼容 GitHub Pages 子路径。
 - 辅助字号调整为 caption 13px、label 14px、UI 15px；正文维持 17px，主要课程代码维持 13px。`--muted` / `--faint` 在主题背景上的计算对比度最低约 4.59:1。
-- `npm run check`：0 errors / 0 warnings / 0 hints；`npm run build`：95 页构建和 Pagefind 索引成功；`git diff --check` 通过。未运行测试；浏览器视觉复核受当前 CUA 页面读取超时限制。
+- `npm run check`：0 errors / 0 warnings / 0 hints；`npm run build`：95 页构建和 Pagefind 索引成功；`git diff --check` 通过。首次 Pages workflow 发现布局检查仍期待旧的 14/13/12px 字号，已将三项断言同步为 15/14/13px；本地未运行测试，等待推送后的 workflow 复验。浏览器视觉复核受当前 CUA 页面读取超时限制。
